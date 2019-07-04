@@ -94,6 +94,11 @@ set -o pipefail
     else:
         inputs += extra_inputs
 
+    if input_manifests != None:
+        input_manifests = input_manifests + cc.manifests
+    else:
+        input_manifests = cc.manifests
+
     hs.actions.run_shell(
         inputs = inputs,
         input_manifests = input_manifests,
@@ -151,6 +156,8 @@ def _haskell_toolchain_impl(ctx):
         for lib in ctx.attr.libraries
     }
 
+    (cc_wrapper_inputs, cc_wrapper_manifest) = ctx.resolve_tools(tools = [ctx.attr._cc_wrapper])
+
     return [
         platform_common.ToolchainInfo(
             name = ctx.label.name,
@@ -160,6 +167,11 @@ def _haskell_toolchain_impl(ctx):
             haddock_flags = ctx.attr.haddock_flags,
             locale = ctx.attr.locale,
             locale_archive = locale_archive,
+            cc_wrapper = struct(
+                executable = ctx.executable._cc_wrapper,
+                inputs = cc_wrapper_inputs,
+                manifests = cc_wrapper_manifest,
+            ),
             osx_cc_wrapper_tpl = ctx.file._osx_cc_wrapper_tpl,
             mode = ctx.var["COMPILATION_MODE"],
             actions = struct(
@@ -224,6 +236,11 @@ _haskell_toolchain = rule(
             doc = """
 Label pointing to the locale archive file to use. Mostly useful on NixOS.
 """,
+        ),
+        "_cc_wrapper": attr.label(
+            cfg = "host",
+            default = Label("@rules_haskell//haskell:cc_wrapper"),
+            executable = True,
         ),
         "_osx_cc_wrapper_tpl": attr.label(
             allow_single_file = True,
