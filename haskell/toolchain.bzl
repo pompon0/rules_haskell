@@ -172,7 +172,6 @@ def _haskell_toolchain_impl(ctx):
                 inputs = cc_wrapper_inputs,
                 manifests = cc_wrapper_manifest,
             ),
-            osx_cc_wrapper_tpl = ctx.file._osx_cc_wrapper_tpl,
             mode = ctx.var["COMPILATION_MODE"],
             actions = struct(
                 compile_binary = compile_binary,
@@ -241,10 +240,6 @@ Label pointing to the locale archive file to use. Mostly useful on NixOS.
             cfg = "host",
             default = Label("@rules_haskell//haskell:cc_wrapper"),
             executable = True,
-        ),
-        "_osx_cc_wrapper_tpl": attr.label(
-            allow_single_file = True,
-            default = Label("@rules_haskell//haskell:private/osx_cc_wrapper.sh.tpl"),
         ),
     },
 )
