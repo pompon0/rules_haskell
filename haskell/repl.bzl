@@ -284,6 +284,7 @@ def _create_repl(hs, ctx, repl_info, output):
         substitutions = {
             "{ENV}": render_env(dicts.add(hs.env, ghc_env)),
             "{TOOL}": hs.tools.ghci.path,
+            "{CC}": hs.toolchain.cc_wrapper.executable.path,
             "{ARGS}": " ".join(
                 args + [
                     shell.quote(a)
@@ -307,6 +308,8 @@ def _create_repl(hs, ctx, repl_info, output):
                 depset([hs.toolchain.locale_archive] if hs.toolchain.locale_archive else []),
             ]),
             collect_data = ctx.attr.collect_data,
+        ).merge(
+            hs.toolchain.cc_wrapper.runfiles,
         ),
     )]
 
