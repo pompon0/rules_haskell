@@ -59,7 +59,7 @@ def cc_interop_info(ctx):
             ] + [
                 f
                 for include in cc_ctx.system_includes.to_list()
-                for f in ["-isystem", include]
+                for f in ["-I", include]
             ],
         )
 
