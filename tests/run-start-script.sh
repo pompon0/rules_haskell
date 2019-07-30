@@ -7,7 +7,8 @@ set -e
 
 pwd=$(pwd)
 cd $(mktemp -d)
-$pwd/start --use-bindists
+# arguments are passed on to the start script
+$pwd/start "$@"
 
 # Copy the bazel configuration, this is only useful for CI
 mkdir tools
