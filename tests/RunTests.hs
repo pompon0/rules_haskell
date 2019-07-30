@@ -58,9 +58,6 @@ main = hspec $ do
       let p' (stdout, _stderr) = sort (lines stdout) == ["tests/multi_repl/core_package_dep/Lib.hs"]
       outputSatisfy p' (bazel ["run", "//tests/multi_repl:core_package_dep", "--", "-ignore-dot-ghci", "-e", ":show targets"])
 
-  it "startup script" $ do
-    assertSuccess (safeShell ["./tests/run-start-script.sh"])
-
   describe "failures" $ do
     all_failure_tests <- bazelQuery "kind(rule, //tests/failures/...) intersect attr('tags', 'manual', //tests/failures/...)"
 
