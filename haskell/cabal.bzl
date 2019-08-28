@@ -380,11 +380,15 @@ def _haskell_cabal_binary_impl(ctx):
         cc_infos = [dep[CcInfo] for dep in ctx.attr.deps if CcInfo in dep],
     )
     unix = ctx.toolchains["@rules_haskell//haskell/private/unix:toolchain_type"]
+    package_id = "{}-{}".format(
+        hs.label.name,
+        ctx.attr.version,
+    )
 
     cabal = _find_cabal(hs, ctx.files.srcs)
     setup = _find_setup(hs, cabal, ctx.files.srcs)
     package_database = hs.actions.declare_file(
-        "_install/{}.conf.d/package.cache".format(hs.label.name),
+        "_install/{}.conf.d/package.cache".format(package_id),
         sibling = cabal,
     )
     binary = hs.actions.declare_file(
@@ -395,7 +399,7 @@ def _haskell_cabal_binary_impl(ctx):
         sibling = cabal,
     )
     data_dir = hs.actions.declare_directory(
-        "_install/{}_data".format(hs.label.name),
+        "_install/{}_data".format(package_id),
         sibling = cabal,
     )
     (tool_inputs, tool_input_manifests) = ctx.resolve_tools(tools = ctx.attr.tools)
@@ -406,7 +410,7 @@ def _haskell_cabal_binary_impl(ctx):
         dep_info,
         cc_info,
         component = "exe:{}".format(hs.label.name),
-        package_id = hs.label.name,
+        package_id = package_id,
         tool_inputs = tool_inputs,
         tool_input_manifests = tool_input_manifests,
         cabal = cabal,
@@ -460,6 +464,11 @@ haskell_cabal_binary = rule(
     attrs = {
         "srcs": attr.label_list(allow_files = True),
         "deps": attr.label_list(),
+        "version": attr.string(
+            doc = "Version of the Cabal package.",
+            mandatory = True,
+        ),
+
         "tools": attr.label_list(
             cfg = "host",
             doc = """Tool dependencies. They are built using the host configuration, since
