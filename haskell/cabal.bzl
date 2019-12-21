@@ -403,14 +403,10 @@ def _haskell_cabal_binary_impl(ctx):
     cc_info = cc_common.merge_cc_infos(
         cc_infos = [dep[CcInfo] for dep in ctx.attr.deps if CcInfo in dep],
     )
-<<<<<<< HEAD
-    unix = ctx.toolchains["@rules_haskell//haskell/private/unix:toolchain_type"]
     package_id = "{}-{}".format(
         hs.label.name,
         ctx.attr.version,
     )
-=======
->>>>>>> upstream/master
 
     # Separate direct C library dependencies.
     direct_cc_info = cc_common.merge_cc_infos(
@@ -504,18 +500,14 @@ haskell_cabal_binary = rule(
     attrs = {
         "srcs": attr.label_list(allow_files = True),
         "deps": attr.label_list(),
-<<<<<<< HEAD
         "version": attr.string(
             doc = "Version of the Cabal package.",
             mandatory = True,
         ),
-
-=======
         "compiler_flags": attr.string_list(
             doc = """Flags to pass to Haskell compiler, in addition to those defined
             the cabal file. Subject to Make variable substitution.""",
         ),
->>>>>>> upstream/master
         "tools": attr.label_list(
             cfg = "host",
             doc = """Tool dependencies. They are built using the host configuration, since
