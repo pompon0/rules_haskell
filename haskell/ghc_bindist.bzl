@@ -1,10 +1,7 @@
 """Workspace rules (GHC binary distributions)"""
 
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "patch")
-load(
-    "@rules_haskell//haskell/private/unix:unix_configure.bzl",
-    "unix_configure",
-)
+load("@rules_sh//sh:posix.bzl", "sh_posix_configure")
 
 _GHC_DEFAULT_VERSION = "8.6.5"
 
@@ -167,6 +164,20 @@ GHC_BINDIST = \
             "windows_amd64": (
                 "https://downloads.haskell.org/~ghc/8.6.5/ghc-8.6.5-x86_64-unknown-mingw32.tar.xz",
                 "457024c6ea43bdce340af428d86319931f267089398b859b00efdfe2fd4ce93f",
+            ),
+        },
+        "8.8.1": {
+            "darwin_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.1/ghc-8.8.1-x86_64-apple-darwin.tar.xz",
+                "38c8917b47c31bedf58c9305dfca3abe198d8d35570366f0773c4e2948bd8abe",
+            ),
+            "linux_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.1/ghc-8.8.1-x86_64-deb8-linux.tar.xz",
+                "fd96eb851971fbc3332bf2fa7821732cfa8b37e5a076a69f6a06f83f0ea7ccc5",
+            ),
+            "windows_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.1/ghc-8.8.1-x86_64-unknown-mingw32.tar.xz",
+                "29e56e6af38017a5a76b2b6995a39d3988fa58131e4b55b62dd317ba7186ac9b",
             ),
         },
     }
@@ -452,9 +463,9 @@ def haskell_register_ghc_bindists(
             haddock_flags = haddock_flags,
             repl_ghci_args = repl_ghci_args,
         )
-    local_unix_repo_name = "rules_haskell_unix_local"
-    if local_unix_repo_name not in native.existing_rules():
-        unix_configure(name = local_unix_repo_name)
+    local_sh_posix_repo_name = "rules_haskell_sh_posix_local"
+    if local_sh_posix_repo_name not in native.existing_rules():
+        sh_posix_configure(name = local_sh_posix_repo_name)
 
 def _find_python(repository_ctx):
     python = repository_ctx.which("python3")

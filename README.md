@@ -2,6 +2,7 @@
 
 # Haskell rules for [Bazel][bazel]
 
+[![Build status](https://badge.buildkite.com/e2c5c0df5e33572bab10dbf230b6f2204f1fcce51c42fdc760.svg?branch=master)](https://buildkite.com/tweag-1/rules-haskell)
 [![CircleCI](https://circleci.com/gh/tweag/rules_haskell.svg?style=svg)](https://circleci.com/gh/tweag/rules_haskell)
 [![Build Status](https://dev.azure.com/tweag/rules_haskell/_apis/build/status/tweag.rules_haskell?branchName=master)](https://dev.azure.com/tweag/rules_haskell/_build/latest?definitionId=1?branchName=master)
 
@@ -63,6 +64,9 @@ provision GHC.
 If you are on NixOS, this is the only way to set up your project,
 because the GHC toolchain provisioned through binary distributions
 cannot be executed on NixOS.
+
+If you are on macOS, you will have to set the environment variable
+`BAZEL_USE_CPP_ONLY_TOOLCHAIN = 1`, so that Bazel picks the correct C compiler.
 
 [bazel-cli-commands]: https://docs.bazel.build/versions/master/command-line-reference.html#commands
 [nixpkgs]: https://nixos.org/nixpkgs/

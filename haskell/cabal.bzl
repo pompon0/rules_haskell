@@ -1,19 +1,22 @@
 """Cabal packages"""
 
-load("@bazel_skylib//:lib.bzl", "paths")
+load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load(":cc.bzl", "cc_interop_info")
 load(":private/context.bzl", "haskell_context", "render_env")
 load(":private/dependencies.bzl", "gather_dep_info")
+load(":private/expansions.bzl", "expand_make_variables")
 load(":private/mode.bzl", "is_profiling_enabled")
-load(":private/path_utils.bzl", "truly_relativize")
+load(":private/path_utils.bzl", "join_path_list", "truly_relativize")
 load(":private/set.bzl", "set")
+load(":haddock.bzl", "generate_unified_haddock_info")
 load(
     ":private/workspace_utils.bzl",
     _execute_or_fail_loudly = "execute_or_fail_loudly",
 )
 load(
     ":providers.bzl",
+    "HaddockInfo",
     "HaskellInfo",
     "HaskellLibraryInfo",
     "get_ghci_extra_libs",
@@ -78,82 +81,66 @@ _CABAL_TOOL_LIBRARIES = ["cpphs", "doctest"]
 # assumption that such packages are old and rare.
 #
 # TODO: replace this with a more general solution.
-_EMPTY_PACKAGES_BLACKLIST = ["bytestring-builder", "nats"]
+_EMPTY_PACKAGES_BLACKLIST = [
+    "bytestring-builder",
+    "fail",
+    "mtl-compat",
+    "nats",
+]
 
 def _cabal_tool_flag(tool):
     """Return a --with-PROG=PATH flag if input is a recognized Cabal tool. None otherwise."""
     if tool.basename in _CABAL_TOOLS:
         return "--with-{}={}".format(tool.basename, tool.path)
 
-def _make_path(hs, binaries):
-    return ":".join([binary.dirname for binary in binaries.to_list()] + ["$PATH"])
+def _binary_paths(binaries):
+    return [binary.dirname for binary in binaries.to_list()]
 
-def _prepare_cabal_inputs(hs, cc, unix, dep_info, cc_info, component, package_id, tool_inputs, tool_input_manifests, cabal, setup, srcs, flags, cabal_wrapper_tpl, package_database):
+def _prepare_cabal_inputs(hs, cc, posix, dep_info, cc_info, direct_cc_info, component, package_id, tool_inputs, tool_input_manifests, cabal, setup, srcs, compiler_flags, flags, cabal_wrapper, package_database):
     """Compute Cabal wrapper, arguments, inputs."""
     with_profiling = is_profiling_enabled(hs)
 
-    (ghci_extra_libs, env) = get_ghci_extra_libs(hs, cc_info)
-    env["PATH"] = _make_path(hs, tool_inputs) + ":" + ":".join(unix.paths)
+    # Haskell library dependencies or indirect C library dependencies are
+    # already covered by their corresponding package-db entries. We only need
+    # to add libraries and headers for direct C library dependencies to the
+    # command line.
+    (direct_libs, _) = get_ghci_extra_libs(hs, posix, direct_cc_info)
+    (transitive_libs, env) = get_ghci_extra_libs(hs, posix, cc_info)
+    env.update(**hs.env)
+    env["PATH"] = join_path_list(hs, _binary_paths(tool_inputs) + posix.paths)
     if hs.toolchain.is_darwin:
         env["SDKROOT"] = "macosx"  # See haskell/private/actions/link.bzl
 
-    # TODO Instantiating this template could be done just once in the
-    # toolchain rule.
-    cabal_wrapper = hs.actions.declare_file("cabal_wrapper-{}.sh".format(hs.label.name))
-    hs.actions.expand_template(
-        template = cabal_wrapper_tpl,
-        output = cabal_wrapper,
-        is_executable = True,
-        substitutions = {
-            "%{ghc}": hs.tools.ghc.path,
-            "%{ghc_pkg}": hs.tools.ghc_pkg.path,
-            "%{runghc}": hs.tools.runghc.path,
-            "%{ar}": cc.tools.ar,
-            "%{cc}": cc.tools.cc,
-            "%{strip}": cc.tools.strip,
-            # XXX Workaround
-            # https://github.com/bazelbuild/bazel/issues/5980.
-            "%{env}": render_env(env),
-            "%{is_windows}": str(hs.toolchain.is_windows),
-        },
-    )
-
     args = hs.actions.args()
     package_databases = dep_info.package_databases
-    extra_headers = cc_info.compilation_context.headers
-    extra_include_dirs = depset(transitive = [
-        cc_info.compilation_context.includes,
-        cc_info.compilation_context.quote_includes,
-        cc_info.compilation_context.system_includes,
+    transitive_headers = cc_info.compilation_context.headers
+    direct_include_dirs = depset(transitive = [
+        direct_cc_info.compilation_context.includes,
+        direct_cc_info.compilation_context.quote_includes,
+        direct_cc_info.compilation_context.system_includes,
     ])
-    extra_lib_dirs = [
-        file.dirname
-        for file in ghci_extra_libs.to_list()
-        # Exclude Haskell libraries, as these are already covered by
-        # package-dbs. This is to avoid command-line length overflow on
-        # collect2.
-        if not file.basename.startswith("libHS")
-    ]
+    direct_lib_dirs = [file.dirname for file in direct_libs.to_list()]
     args.add_all([component, package_id, setup, cabal.dirname, package_database.dirname])
     args.add("--flags=" + " ".join(flags))
+    args.add_all(compiler_flags, format_each = "--ghc-option=%s")
     args.add("--")
     args.add_all(package_databases, map_each = _dirname, format_each = "--package-db=%s")
-    args.add_all(extra_include_dirs, format_each = "--extra-include-dirs=%s")
-    args.add_all(extra_lib_dirs, format_each = "--extra-lib-dirs=%s", uniquify = True)
+    args.add_all(direct_include_dirs, format_each = "--extra-include-dirs=%s")
+    args.add_all(direct_lib_dirs, format_each = "--extra-lib-dirs=%s", uniquify = True)
     if with_profiling:
         args.add("--enable-profiling")
 
-    # Redundant with _make_path() above, but better be explicit when we can.
+    # Redundant with _binary_paths() above, but better be explicit when we can.
     args.add_all(tool_inputs, map_each = _cabal_tool_flag)
 
     inputs = depset(
-        [cabal_wrapper, setup, hs.tools.ghc, hs.tools.ghc_pkg, hs.tools.runghc],
+        [setup, hs.tools.ghc, hs.tools.ghc_pkg, hs.tools.runghc],
         transitive = [
             depset(srcs),
             depset(cc.files),
             package_databases,
-            extra_headers,
-            ghci_extra_libs,
+            transitive_headers,
+            transitive_libs,
             dep_info.interface_dirs,
             dep_info.static_libraries,
             dep_info.dynamic_libraries,
@@ -174,16 +161,28 @@ def _haskell_cabal_library_impl(ctx):
     hs = haskell_context(ctx)
     dep_info = gather_dep_info(ctx, ctx.attr.deps)
     cc = cc_interop_info(ctx)
+
+    # All C and Haskell library dependencies.
     cc_info = cc_common.merge_cc_infos(
         cc_infos = [dep[CcInfo] for dep in ctx.attr.deps if CcInfo in dep],
     )
-    unix = ctx.toolchains["@rules_haskell//haskell/private/unix:toolchain_type"]
+
+    # Separate direct C library dependencies.
+    direct_cc_info = cc_common.merge_cc_infos(
+        cc_infos = [
+            dep[CcInfo]
+            for dep in ctx.attr.deps
+            if CcInfo in dep and not HaskellInfo in dep
+        ],
+    )
+    posix = ctx.toolchains["@rules_sh//sh/posix:toolchain_type"]
     package_id = "{}-{}".format(
         ctx.attr.package_name if ctx.attr.package_name else hs.label.name,
         ctx.attr.version,
     )
     with_profiling = is_profiling_enabled(hs)
 
+    user_compile_flags = _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
     cabal = _find_cabal(hs, ctx.files.srcs)
     setup = _find_setup(hs, cabal, ctx.files.srcs)
     package_database = hs.actions.declare_file(
@@ -196,6 +195,14 @@ def _haskell_cabal_library_impl(ctx):
     )
     data_dir = hs.actions.declare_directory(
         "_install/{}_data".format(package_id),
+        sibling = cabal,
+    )
+    haddock_file = hs.actions.declare_file(
+        "_install/{}_haddock/{}.haddock".format(package_id, ctx.attr.name),
+        sibling = cabal,
+    )
+    haddock_html_dir = hs.actions.declare_directory(
+        "_install/{}_haddock_html".format(package_id),
         sibling = cabal,
     )
     static_library_filename = "_install/lib/libHS{}.a".format(package_id)
@@ -220,9 +227,10 @@ def _haskell_cabal_library_impl(ctx):
     c = _prepare_cabal_inputs(
         hs,
         cc,
-        unix,
+        posix,
         dep_info,
         cc_info,
+        direct_cc_info,
         component = "lib:{}".format(
             ctx.attr.package_name if ctx.attr.package_name else hs.label.name,
         ),
@@ -232,25 +240,28 @@ def _haskell_cabal_library_impl(ctx):
         cabal = cabal,
         setup = setup,
         srcs = ctx.files.srcs,
+        compiler_flags = user_compile_flags,
         flags = ctx.attr.flags,
-        cabal_wrapper_tpl = ctx.file._cabal_wrapper_tpl,
+        cabal_wrapper = ctx.executable._cabal_wrapper,
         package_database = package_database,
     )
-    ctx.actions.run_shell(
-        command = '{} "$@"'.format(c.cabal_wrapper.path),
+    ctx.actions.run(
+        executable = c.cabal_wrapper,
         arguments = [c.args],
         inputs = c.inputs,
         input_manifests = c.input_manifests,
+        tools = [c.cabal_wrapper],
         outputs = [
             package_database,
             interfaces_dir,
             static_library,
             data_dir,
+            haddock_file,
+            haddock_html_dir,
         ] + ([dynamic_library] if dynamic_library != None else []),
         env = c.env,
         mnemonic = "HaskellCabalLibrary",
         progress_message = "HaskellCabalLibrary {}".format(hs.label),
-        use_default_shell_env = True,
     )
 
     default_info = DefaultInfo(
@@ -279,6 +290,12 @@ def _haskell_cabal_library_impl(ctx):
         compile_flags = [],
     )
     lib_info = HaskellLibraryInfo(package_id = package_id, version = None, exports = [])
+    doc_info = generate_unified_haddock_info(
+        this_package_id = package_id,
+        this_package_html = haddock_html_dir,
+        this_package_haddock = haddock_file,
+        deps = ctx.attr.deps,
+    )
     cc_toolchain = find_cpp_toolchain(ctx)
     feature_configuration = cc_common.configure_features(
         ctx = ctx,
@@ -306,7 +323,7 @@ def _haskell_cabal_library_impl(ctx):
             cc_info,
         ],
     )
-    return [default_info, hs_info, cc_info, lib_info]
+    return [default_info, hs_info, cc_info, lib_info, doc_info]
 
 haskell_cabal_library = rule(
     _haskell_cabal_library_impl,
@@ -320,6 +337,10 @@ haskell_cabal_library = rule(
         ),
         "srcs": attr.label_list(allow_files = True),
         "deps": attr.label_list(),
+        "compiler_flags": attr.string_list(
+            doc = """Flags to pass to Haskell compiler, in addition to those defined
+            the cabal file. Subject to Make variable substitution.""",
+        ),
         "tools": attr.label_list(
             cfg = "host",
             allow_files = True,
@@ -329,9 +350,10 @@ haskell_cabal_library = rule(
         "flags": attr.string_list(
             doc = "List of Cabal flags, will be passed to `Setup.hs configure --flags=...`.",
         ),
-        "_cabal_wrapper_tpl": attr.label(
-            allow_single_file = True,
-            default = Label("@rules_haskell//haskell:private/cabal_wrapper.sh.tpl"),
+        "_cabal_wrapper": attr.label(
+            executable = True,
+            cfg = "host",
+            default = Label("@rules_haskell//haskell:cabal_wrapper"),
         ),
         "_cc_toolchain": attr.label(
             default = Label("@bazel_tools//tools/cpp:current_cc_toolchain"),
@@ -339,7 +361,7 @@ haskell_cabal_library = rule(
     },
     toolchains = [
         "@rules_haskell//haskell:toolchain",
-        "@rules_haskell//haskell/private/unix:toolchain_type",
+        "@rules_sh//sh/posix:toolchain_type",
     ],
     fragments = ["cpp"],
 )
@@ -376,15 +398,31 @@ def _haskell_cabal_binary_impl(ctx):
     hs = haskell_context(ctx)
     dep_info = gather_dep_info(ctx, ctx.attr.deps)
     cc = cc_interop_info(ctx)
+
+    # All C and Haskell library dependencies.
     cc_info = cc_common.merge_cc_infos(
         cc_infos = [dep[CcInfo] for dep in ctx.attr.deps if CcInfo in dep],
     )
+<<<<<<< HEAD
     unix = ctx.toolchains["@rules_haskell//haskell/private/unix:toolchain_type"]
     package_id = "{}-{}".format(
         hs.label.name,
         ctx.attr.version,
     )
+=======
+>>>>>>> upstream/master
 
+    # Separate direct C library dependencies.
+    direct_cc_info = cc_common.merge_cc_infos(
+        cc_infos = [
+            dep[CcInfo]
+            for dep in ctx.attr.deps
+            if CcInfo in dep and not HaskellInfo in dep
+        ],
+    )
+    posix = ctx.toolchains["@rules_sh//sh/posix:toolchain_type"]
+
+    user_compile_flags = _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
     cabal = _find_cabal(hs, ctx.files.srcs)
     setup = _find_setup(hs, cabal, ctx.files.srcs)
     package_database = hs.actions.declare_file(
@@ -406,9 +444,10 @@ def _haskell_cabal_binary_impl(ctx):
     c = _prepare_cabal_inputs(
         hs,
         cc,
-        unix,
+        posix,
         dep_info,
         cc_info,
+        direct_cc_info,
         component = "exe:{}".format(hs.label.name),
         package_id = package_id,
         tool_inputs = tool_inputs,
@@ -416,12 +455,13 @@ def _haskell_cabal_binary_impl(ctx):
         cabal = cabal,
         setup = setup,
         srcs = ctx.files.srcs,
+        compiler_flags = user_compile_flags,
         flags = ctx.attr.flags,
-        cabal_wrapper_tpl = ctx.file._cabal_wrapper_tpl,
+        cabal_wrapper = ctx.executable._cabal_wrapper,
         package_database = package_database,
     )
-    ctx.actions.run_shell(
-        command = '{} "$@"'.format(c.cabal_wrapper.path),
+    ctx.actions.run(
+        executable = c.cabal_wrapper,
         arguments = [c.args],
         inputs = c.inputs,
         input_manifests = c.input_manifests,
@@ -430,10 +470,10 @@ def _haskell_cabal_binary_impl(ctx):
             binary,
             data_dir,
         ],
+        tools = [c.cabal_wrapper],
         env = c.env,
         mnemonic = "HaskellCabalBinary",
         progress_message = "HaskellCabalBinary {}".format(hs.label),
-        use_default_shell_env = True,
     )
 
     hs_info = HaskellInfo(
@@ -464,11 +504,18 @@ haskell_cabal_binary = rule(
     attrs = {
         "srcs": attr.label_list(allow_files = True),
         "deps": attr.label_list(),
+<<<<<<< HEAD
         "version": attr.string(
             doc = "Version of the Cabal package.",
             mandatory = True,
         ),
 
+=======
+        "compiler_flags": attr.string_list(
+            doc = """Flags to pass to Haskell compiler, in addition to those defined
+            the cabal file. Subject to Make variable substitution.""",
+        ),
+>>>>>>> upstream/master
         "tools": attr.label_list(
             cfg = "host",
             doc = """Tool dependencies. They are built using the host configuration, since
@@ -477,9 +524,10 @@ haskell_cabal_binary = rule(
         "flags": attr.string_list(
             doc = "List of Cabal flags, will be passed to `Setup.hs configure --flags=...`.",
         ),
-        "_cabal_wrapper_tpl": attr.label(
-            allow_single_file = True,
-            default = Label("@rules_haskell//haskell:private/cabal_wrapper.sh.tpl"),
+        "_cabal_wrapper": attr.label(
+            executable = True,
+            cfg = "host",
+            default = Label("@rules_haskell//haskell:cabal_wrapper"),
         ),
         "_cc_toolchain": attr.label(
             default = Label("@bazel_tools//tools/cpp:current_cc_toolchain"),
@@ -487,7 +535,7 @@ haskell_cabal_binary = rule(
     },
     toolchains = [
         "@rules_haskell//haskell:toolchain",
-        "@rules_haskell//haskell/private/unix:toolchain_type",
+        "@rules_sh//sh/posix:toolchain_type",
     ],
     fragments = ["cpp"],
 )
@@ -872,6 +920,7 @@ haskell_cabal_library(
     deps = {deps},
     tools = {tools},
     visibility = {visibility},
+    compiler_flags = ["-w", "-optF=-w"],
 )
 """.format(
                     name = package.name,
@@ -1070,3 +1119,10 @@ def stack_snapshot(stack = None, extra_deps = {}, vendored_packages = {}, **kwar
         vendored_packages = _invert(vendored_packages),
         **kwargs
     )
+
+def _expand_make_variables(name, ctx, strings):
+    extra_label_attrs = [
+        ctx.attr.srcs,
+        ctx.attr.tools,
+    ]
+    return expand_make_variables(name, ctx, strings, extra_label_attrs)

@@ -1,11 +1,6 @@
 """Workspace rules (repositories)"""
 
-load(":ghc_bindist.bzl", "haskell_register_ghc_bindists")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-def rules_haskell_toolchains(**kwargs):
-    """Register GHC binary distributions for all platforms as toolchains."""
-    haskell_register_ghc_bindists(**kwargs)
 
 def rules_haskell_dependencies():
     """Provide all repositories that are necessary for `rules_haskell` to
@@ -21,12 +16,20 @@ def rules_haskell_dependencies():
             urls = ["https://github.com/bazelbuild/bazel-skylib/archive/0.6.0.tar.gz"],
         )
 
+    if "rules_sh" not in excludes:
+        http_archive(
+            name = "rules_sh",
+            sha256 = "2613156e96b41fe0f91ac86a65edaea7da910b7130f2392ca02e8270f674a734",
+            strip_prefix = "rules_sh-0.1.0",
+            urls = ["https://github.com/tweag/rules_sh/archive/v0.1.0.tar.gz"],
+        )
+
     if "io_tweag_rules_nixpkgs" not in excludes:
         http_archive(
             name = "io_tweag_rules_nixpkgs",
-            sha256 = "5a384daa57b49abf9f0b672852f1a66a3c52aecf9d4d2ac64f6de0fd307690c8",
-            strip_prefix = "rules_nixpkgs-0.5.2",
-            urls = ["https://github.com/tweag/rules_nixpkgs/archive/v0.5.2.tar.gz"],
+            sha256 = "f5af641e16fcff5b24f1a9ba5d93cab5ad26500271df59ede344f1a56fc3b17d",
+            strip_prefix = "rules_nixpkgs-0.6.0",
+            urls = ["https://github.com/tweag/rules_nixpkgs/archive/v0.6.0.tar.gz"],
         )
 
 def haskell_repositories():

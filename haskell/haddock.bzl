@@ -12,6 +12,29 @@ load(
 load(":private/context.bzl", "haskell_context", "render_env")
 load(":private/set.bzl", "set")
 
+def generate_unified_haddock_info(this_package_id, this_package_haddock, this_package_html, deps):
+    """Collapse dependencies into a single `HaddockInfo`.
+
+    Returns:
+      HaddockInfo: Unified information about this package and all its dependencies.
+    """
+    haddock_dict = {}
+    html_dict = {}
+
+    for dep in deps:
+        if HaddockInfo in dep:
+            html_dict.update(dep[HaddockInfo].transitive_html)
+            haddock_dict.update(dep[HaddockInfo].transitive_haddocks)
+
+    html_dict[this_package_id] = this_package_html
+    haddock_dict[this_package_id] = [this_package_haddock]
+
+    return HaddockInfo(
+        package_id = this_package_id,
+        transitive_html = html_dict,
+        transitive_haddocks = haddock_dict,
+    )
+
 def _get_haddock_path(package_id):
     """Get path to Haddock file of a package given its id.
 
@@ -24,7 +47,7 @@ def _get_haddock_path(package_id):
     return package_id + ".haddock"
 
 def _haskell_doc_aspect_impl(target, ctx):
-    if not (HaskellLibraryInfo in target and target[HaskellInfo].source_files.to_list()):
+    if not (HaskellLibraryInfo in target):
         return []
 
     # Packages imported via `//haskell:import.bzl%haskell_import` already
@@ -33,8 +56,31 @@ def _haskell_doc_aspect_impl(target, ctx):
         return []
 
     hs = haskell_context(ctx, ctx.rule.attr)
+    posix = ctx.toolchains["@rules_sh//sh/posix:toolchain_type"]
 
     package_id = target[HaskellLibraryInfo].package_id
+
+    transitive_haddocks = {}
+    transitive_html = {}
+
+    re_exports = getattr(ctx.rule.attr, "exports", [])
+    all_deps = ctx.rule.attr.deps + re_exports
+    for dep in all_deps:
+        if HaddockInfo in dep:
+            transitive_haddocks.update(dep[HaddockInfo].transitive_haddocks)
+            transitive_html.update(dep[HaddockInfo].transitive_html)
+
+    # If the current package has no source file, just returns the haddocks for
+    # its dependencies
+    if (target[HaskellInfo].source_files.to_list() == []):
+        haddock_info = HaddockInfo(
+            package_id = package_id,
+            transitive_html = transitive_html,
+            transitive_haddocks = transitive_haddocks,
+        )
+        ctx.actions.do_nothing(mnemonic = "HaskellHaddock")
+        return [haddock_info]
+
     html_dir_raw = "doc-{0}".format(package_id)
     html_dir = ctx.actions.declare_directory(html_dir_raw)
     haddock_file = ctx.actions.declare_file(_get_haddock_path(package_id))
@@ -60,14 +106,6 @@ def _haskell_doc_aspect_impl(target, ctx):
         "--hyperlinked-source",
     ])
 
-    transitive_haddocks = {}
-    transitive_html = {}
-
-    for dep in ctx.rule.attr.deps:
-        if HaddockInfo in dep:
-            transitive_haddocks.update(dep[HaddockInfo].transitive_haddocks)
-            transitive_html.update(dep[HaddockInfo].transitive_html)
-
     for pid in transitive_haddocks:
         for interface in transitive_haddocks[pid]:
             args.add("--read-interface=../{0},{1}".format(
@@ -92,6 +130,7 @@ def _haskell_doc_aspect_impl(target, ctx):
     # C library dependencies for runtime.
     (ghci_extra_libs, ghc_env) = get_ghci_extra_libs(
         hs,
+        posix,
         target[CcInfo],
         # haddock changes directory during its execution. We prefix
         # LD_LIBRARY_PATH with the current working directory on wrapper script
@@ -139,7 +178,9 @@ def _haskell_doc_aspect_impl(target, ctx):
             args,
             compile_flags,
         ],
-        use_default_shell_env = True,
+        env = {
+            "PATH": (";" if hs.toolchain.is_windows else ":").join(posix.paths),
+        },
     )
 
     transitive_html.update({package_id: html_dir})
@@ -162,8 +203,11 @@ haskell_doc_aspect = aspect(
             default = Label("@rules_haskell//haskell:private/haddock_wrapper.sh.tpl"),
         ),
     },
-    attr_aspects = ["deps"],
-    toolchains = ["@rules_haskell//haskell:toolchain"],
+    attr_aspects = ["deps", "exports"],
+    toolchains = [
+        "@rules_haskell//haskell:toolchain",
+        "@rules_sh//sh/posix:toolchain_type",
+    ],
 )
 
 def _dirname(file):

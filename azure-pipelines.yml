@@ -9,7 +9,7 @@ jobs:
       architecture: 'x64'
   - bash: |
       set -e
-      curl -LO https://github.com/bazelbuild/bazel/releases/download/0.28.0/bazel-0.28.0-windows-x86_64.exe
+      curl -LO https://github.com/bazelbuild/bazel/releases/download/1.1.0/bazel-1.1.0-windows-x86_64.exe
       mv bazel-*.exe bazel.exe
       mkdir /c/bazel
       mv bazel.exe /c/bazel
@@ -36,44 +36,6 @@ jobs:
         curl -sSL https://get.haskellstack.org/ | sh
         stack update
     displayName: "Install Stack"
-
-  - bash: |
-      set -e
-      export MSYS2_ARG_CONV_EXCL="*"
-
-      /c/bazel/bazel.exe build --config windows "@haskell_aeson//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_aeson__extra//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_cassava//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_conduit//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_fuzzyset//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_lens//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_network//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_text__metrics//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_cryptonite//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_unix__compat//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_hostname//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_zlib//..."
-      /c/bazel/bazel.exe build --config windows "@haskell_ghc__paths//..."
-
-      # FIXME: needs network, warp, cryptonite, etc...
-      # /c/bazel/bazel.exe build --config windows "@haskell_wai__app__static//..."
-
-      # FIXME: Needs to provide advapi32 extra lib.
-      # /c/bazel/bazel.exe build --config windows "@haskell_entropy//..."
-
-      # FIXME: no such package '@taglib//': Platform is not supported (see 'fail_not_supported') and referenced by '@haskell_htaglib//:htaglib'
-      # /c/bazel/bazel.exe build --config windows "@haskell_htaglib//..."
-
-      # FIXME: Cabal version macros issue
-      # /c/bazel/bazel.exe build --config windows "@haskell_pretty__show//..."
-
-      # FIXME: need custom builds
-      # /c/bazel/bazel.exe build --config windows "@haskell_postgresql_libpq_275795853//..."
-
-      # FIXME: depends on network
-      # /c/bazel/bazel.exe build --config windows "@haskell_http__client//..."
-
-    displayName: 'Hazel Tests'
 
   - bash: |
       set -e
@@ -122,8 +84,6 @@ jobs:
       /c/bazel/bazel.exe test --config windows "//tests/two-libs/..."
       /c/bazel/bazel.exe test --config windows "//tests/encoding/..."
       /c/bazel/bazel.exe test --config windows "//tests/c-compiles/..."
-
-      # Hazel tests that succeed
-      /c/bazel/bazel.exe test --config windows "@ai_formation_hazel//test:ghc-paths-test"
+      /c/bazel/bazel.exe test --config windows "//tests/stack-snapshot-deps/..."
 
     displayName: 'Run Bazel'

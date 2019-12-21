@@ -103,20 +103,28 @@ def declare_compiled(hs, src, ext, directory = None, rel_path = None):
 
     return hs.actions.declare_file(fp_with_dir)
 
-def make_path(libs, prefix = None, sep = None):
+def join_path_list(hs, paths):
+    """Join the given paths suitable for env vars like PATH.
+
+    Joins the list of given paths into a single string separated by ':' on Unix
+    or ';' on Windows.
+    """
+    sep = ";" if hs.toolchain.is_windows else ":"
+    return sep.join(paths)
+
+def make_library_path(hs, libs, prefix = None):
     """Return a string value for using as LD_LIBRARY_PATH or similar.
 
     Args:
+      hs: Haskell context.
       libs: List of library files that should be available
       prefix: String, an optional prefix to add to every path.
-      sep: String, the path separator, defaults to ":".
 
     Returns:
-      String: paths to the given library directories separated by ":".
+      String: paths to the given library directories separated by ":" (Unix) or
+        ";" (Windows).
     """
     r = set.empty()
-
-    sep = sep if sep else ":"
 
     for lib in libs.to_list():
         lib_dir = paths.dirname(lib.path)
@@ -125,9 +133,9 @@ def make_path(libs, prefix = None, sep = None):
 
         set.mutable_insert(r, lib_dir)
 
-    return sep.join(set.to_list(r))
+    return join_path_list(hs, set.to_list(r))
 
-def mangle_static_library(hs, dynamic_lib, static_lib, outdir):
+def mangle_static_library(hs, posix, dynamic_lib, static_lib, outdir):
     """Mangle a static library to match a dynamic library name.
 
     GHC expects static and dynamic C libraries to have matching library names.
@@ -153,7 +161,7 @@ def mangle_static_library(hs, dynamic_lib, static_lib, outdir):
     if static_lib == None:
         return static_lib
     libname = get_lib_name(dynamic_lib)
-    if libname.startswith("HS"):
+    if is_hs_library(libname):
         return static_lib
     if get_lib_name(static_lib) == libname:
         return static_lib
@@ -161,7 +169,7 @@ def mangle_static_library(hs, dynamic_lib, static_lib, outdir):
         link = hs.actions.declare_file(
             paths.join(outdir, "lib" + libname + "." + static_lib.extension),
         )
-        ln(hs, static_lib, link)
+        ln(hs, posix, static_lib, link)
         return link
 
 def get_dirname(file):
@@ -197,6 +205,10 @@ def get_lib_extension(lib):
     n = lib.basename.find(".so.")
     end = lib.extension if n == -1 else lib.basename[n + 1:]
     return end
+
+def is_hs_library(libname):
+    """Returns True if the library belongs into the hs-libraries field."""
+    return libname.startswith("HS") or libname.startswith("Cffi")
 
 def get_dynamic_hs_lib_name(ghc_version, lib):
     """Return name of library by dropping extension,
@@ -254,7 +266,7 @@ def link_libraries(libs, args, prefix_optl = False):
     cc_libs = depset(direct = [
         lib
         for lib in libs.to_list()
-        if not get_lib_name(lib).startswith("HS")
+        if not is_hs_library(get_lib_name(lib))
     ])
 
     if prefix_optl:
@@ -475,7 +487,7 @@ def rel_to_pkgroot(target, pkgdb):
         truly_relativize(target, paths.dirname(pkgdb)),
     )
 
-def ln(hs, target, link, extra_inputs = depset()):
+def ln(hs, posix, target, link, extra_inputs = depset()):
     """Create a symlink to target.
 
     Args:
@@ -490,11 +502,11 @@ def ln(hs, target, link, extra_inputs = depset()):
         inputs = depset([target], transitive = [extra_inputs]),
         outputs = [link],
         mnemonic = "Symlink",
-        command = "ln -s {target} {link}".format(
+        command = '"{ln}" -s {target} {link}'.format(
+            ln = posix.commands["ln"],
             target = relative_target,
             link = link.path,
         ),
-        use_default_shell_env = True,
         # Don't sandbox symlinking to reduce overhead.
         # See https://github.com/tweag/rules_haskell/issues/958.
         execution_requirements = {

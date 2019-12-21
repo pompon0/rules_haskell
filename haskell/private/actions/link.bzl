@@ -94,7 +94,7 @@ def _darwin_create_extra_linker_flags_file(hs, cc, objects_dir, executable, dyna
     )
     return linker_flags_file
 
-def _create_objects_dir_manifest(hs, objects_dir, dynamic, with_profiling):
+def _create_objects_dir_manifest(hs, posix, objects_dir, dynamic, with_profiling):
     suffix = ".dynamic.manifest" if dynamic else ".static.manifest"
     objects_dir_manifest = hs.actions.declare_file(
         objects_dir.basename + suffix,
@@ -110,14 +110,20 @@ def _create_objects_dir_manifest(hs, objects_dir, dynamic, with_profiling):
     hs.actions.run_shell(
         inputs = [objects_dir],
         outputs = [objects_dir_manifest],
+
+        # Note: The output of `find` is not stable. The order of the
+        # lines in the output depend on the filesystem. By using
+        # `sort`, we force the output to be stable. This is mandatory
+        # for efficient caching. See
+        # https://github.com/tweag/rules_haskell/issues/1126.
         command = """
-        find {dir} -name '*.{ext}' | sort > {out}
+        "{find}" {dir} -name '*.{ext}' | sort > {out}
         """.format(
+            find = posix.commands["find"],
             dir = objects_dir.path,
             ext = ext,
             out = objects_dir_manifest.path,
         ),
-        use_default_shell_env = True,
     )
 
     return objects_dir_manifest
@@ -125,6 +131,7 @@ def _create_objects_dir_manifest(hs, objects_dir, dynamic, with_profiling):
 def link_binary(
         hs,
         cc,
+        posix,
         dep_info,
         cc_info,
         extra_srcs,
@@ -183,6 +190,7 @@ def link_binary(
 
     (cache_file, static_libs, dynamic_libs) = create_link_config(
         hs = hs,
+        posix = posix,
         cc_info = cc_info,
         dynamic = dynamic,
         binary = executable,
@@ -199,6 +207,7 @@ def link_binary(
 
     objects_dir_manifest = _create_objects_dir_manifest(
         hs,
+        posix,
         objects_dir,
         dynamic = dynamic,
         with_profiling = with_profiling,
@@ -261,7 +270,7 @@ def _so_extension(hs):
     """
     return "dylib" if hs.toolchain.is_darwin else "so"
 
-def link_library_static(hs, cc, dep_info, objects_dir, my_pkg_id, with_profiling):
+def link_library_static(hs, cc, posix, dep_info, objects_dir, my_pkg_id, with_profiling):
     """Link a static library for the package using given object files.
 
     Returns:
@@ -272,6 +281,7 @@ def link_library_static(hs, cc, dep_info, objects_dir, my_pkg_id, with_profiling
     )
     objects_dir_manifest = _create_objects_dir_manifest(
         hs,
+        posix,
         objects_dir,
         dynamic = False,
         with_profiling = with_profiling,
@@ -316,7 +326,7 @@ def link_library_static(hs, cc, dep_info, objects_dir, my_pkg_id, with_profiling
 
     return static_library
 
-def link_library_dynamic(hs, cc, dep_info, cc_info, extra_srcs, objects_dir, my_pkg_id):
+def link_library_dynamic(hs, cc, posix, dep_info, cc_info, extra_srcs, objects_dir, my_pkg_id, compiler_flags):
     """Link a dynamic library for the package using given object files.
 
     Returns:
@@ -334,6 +344,8 @@ def link_library_dynamic(hs, cc, dep_info, cc_info, extra_srcs, objects_dir, my_
     args = hs.actions.args()
     args.add_all(["-optl" + f for f in cc.linker_flags])
     args.add_all(["-shared", "-dynamic"])
+    args.add_all(hs.toolchain.compiler_flags)
+    args.add_all(compiler_flags)
 
     # Work around macOS linker limits.  This fix has landed in GHC HEAD, but is
     # not yet in a release; plus, we still want to support older versions of
@@ -354,6 +366,7 @@ def link_library_dynamic(hs, cc, dep_info, cc_info, extra_srcs, objects_dir, my_
 
     (cache_file, static_libs, dynamic_libs) = create_link_config(
         hs = hs,
+        posix = posix,
         cc_info = cc_info,
         dynamic = True,
         pic = True,
@@ -366,6 +379,7 @@ def link_library_dynamic(hs, cc, dep_info, cc_info, extra_srcs, objects_dir, my_
     # Profiling not supported for dynamic libraries.
     objects_dir_manifest = _create_objects_dir_manifest(
         hs,
+        posix,
         objects_dir,
         dynamic = True,
         with_profiling = False,
