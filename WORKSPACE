@@ -126,18 +126,20 @@ nixpkgs_package(
 )
 
 http_archive(
-    name = "com_google_protobuf",
-    sha256 = "6adf73fd7f90409e479d6ac86529ade2d45f50494c5c10f539226693cb8fe4f7",
-    strip_prefix = "protobuf-3.10.1",
+    name = "rules_proto",
+    sha256 = "73ebe9d15ba42401c785f9d0aeebccd73bd80bf6b8ac78f74996d31f2c0ad7a6",
+    strip_prefix = "rules_proto-2c0468366367d7ed97a1f702f9cd7155ab3f73c5",
     urls = [
-        "https://mirror.bazel.build/github.com/google/protobuf/archive/v3.10.1.tar.gz",
-        "https://github.com/google/protobuf/archive/v3.10.1.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_proto/archive/2c0468366367d7ed97a1f702f9cd7155ab3f73c5.tar.gz",
+        "https://github.com/bazelbuild/rules_proto/archive/2c0468366367d7ed97a1f702f9cd7155ab3f73c5.tar.gz",
     ],
 )
 
-load("@com_google_protobuf//:protobuf_deps.bzl", "protobuf_deps")
+load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_proto_toolchains")
 
-protobuf_deps()  # configure and install zlib for protobuf
+rules_proto_dependencies()
+
+rules_proto_toolchains()
 
 nixpkgs_local_repository(
     name = "nixpkgs_default",
@@ -222,6 +224,7 @@ nixpkgs_package(
     attribute_path = "lz4",
     build_file_content = """
 package(default_visibility = ["//visibility:public"])
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 cc_library(
   name = "nixpkgs_lz4",
@@ -270,6 +273,8 @@ nixpkgs_package(
 nixpkgs_package(
     name = "zlib.dev",
     build_file_content = """
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 filegroup(
     name = "include",
     srcs = glob(["include/*.h"]),
@@ -304,6 +309,7 @@ filegroup(
 http_archive(
     name = "zlib.win",
     build_file_content = """
+load("@rules_cc//cc:defs.bzl", "cc_library")
 cc_library(
     name = "zlib",
     # Import `:z` as `srcs` to enforce the library name `libz.so`. Otherwise,
@@ -330,7 +336,7 @@ jvm_maven_import_external(
     artifact = "org.apache.spark:spark-core_2.10:1.6.0",
     artifact_sha256 = "28aad0602a5eea97e9cfed3a7c5f2934cd5afefdb7f7c1d871bb07985453ea6e",
     licenses = ["notice"],
-    server_urls = ["http://central.maven.org/maven2"],
+    server_urls = ["https://repo.maven.apache.org/maven2"],
 )
 
 # c2hs rule in its own repository
@@ -353,6 +359,7 @@ haskell_package_repository_dummy(
 
 nixpkgs_package(
     name = "nixpkgs_nodejs",
+    build_file_content = 'exports_files(glob(["nixpkgs_nodejs/**"]))',
     # XXX Indirection derivation to make all of NodeJS rooted in
     # a single directory. We shouldn't need this, but it's
     # a workaround for
@@ -382,6 +389,12 @@ http_archive(
     ],
 )
 
+load("@build_bazel_rules_nodejs//:defs.bzl", "node_repositories")
+
+node_repositories(
+    vendored_node = "@nixpkgs_nodejs",
+)
+
 http_archive(
     name = "io_bazel_rules_sass",
     sha256 = "d5e0c0d16fb52f3dcce5bd7830d92d4813eb01bac0211119e74ec9e65eaf3b86",
@@ -399,12 +412,6 @@ rules_sass_dependencies()
 load("@io_bazel_rules_sass//:defs.bzl", "sass_repositories")
 
 sass_repositories()
-
-load("@build_bazel_rules_nodejs//:defs.bzl", "node_repositories")
-
-node_repositories(
-    vendored_node = "@nixpkgs_nodejs",
-)
 
 http_archive(
     name = "io_bazel_skydoc",

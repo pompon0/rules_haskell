@@ -117,9 +117,10 @@ def _create_objects_dir_manifest(hs, posix, objects_dir, dynamic, with_profiling
         # for efficient caching. See
         # https://github.com/tweag/rules_haskell/issues/1126.
         command = """
-        "{find}" {dir} -name '*.{ext}' | sort > {out}
+        "{find}" {dir} -name '*.{ext}' | "{sort}" > {out}
         """.format(
             find = posix.commands["find"],
+            sort = posix.commands["sort"],
             dir = objects_dir.path,
             ext = ext,
             out = objects_dir_manifest.path,
@@ -389,7 +390,7 @@ def link_library_dynamic(hs, cc, posix, dep_info, cc_info, extra_srcs, objects_d
         hs,
         cc,
         inputs = depset([cache_file, objects_dir], transitive = [
-            depset(extra_srcs),
+            extra_srcs,
             dep_info.package_databases,
             dep_info.dynamic_libraries,
             pkg_info_inputs,

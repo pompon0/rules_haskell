@@ -64,7 +64,9 @@ main = hspec $ do
       assertSuccess (bazel ["run", "//tests/multi_repl:c_multi_repl", "--", "-ignore-dot-ghci", "-e", ":load BC.C", "-e", "c"])
 
   describe "failures" $ do
-    all_failure_tests <- bazelQuery "kind(rule, //tests/failures/...) intersect attr('tags', 'manual', //tests/failures/...)"
+    -- Make sure not to include haskell_repl (@repl) or alias (-repl) targets
+    -- in the query. Those would not fail under bazel test.
+    all_failure_tests <- bazelQuery "kind('haskell_library|haskell_binary|haskell_test', //tests/failures/...) intersect attr('tags', 'manual', //tests/failures/...)"
 
     for_ all_failure_tests $ \test -> do
       it test $ do
@@ -88,9 +90,9 @@ main = hspec $ do
 -- | Returns a bazel command line suitable for CI
 -- This should be called with the action as first item of the list. e.g 'bazel ["build", "//..."]'.
 bazel :: [String] -> Process.CreateProcess
--- Note: --config=ci is intercalated between the action and the list
--- of arguments. It should appears after the action, but before any
--- @--@ following argument.
+-- Note: --config=ci is intercalated between the action and the list of
+-- arguments. It should appear after the action, but before any @--@
+-- following argument.
 bazel (command:args) = Process.proc "bazel" (command:"--config=ci":args)
 bazel [] = Process.proc "bazel" []
 
@@ -112,7 +114,7 @@ outputSatisfy predicate cmd = do
     ExitSuccess -> (stdout, stderr) `shouldSatisfy` predicate
     ExitFailure _ -> expectationFailure (formatOutput exitCode stdout stderr)
 
--- | The command must success
+-- | The command must succeed
 assertSuccess :: Process.CreateProcess -> IO ()
 assertSuccess = outputSatisfy (const True)
 

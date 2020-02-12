@@ -1,3 +1,4 @@
+load("@rules_python//python:defs.bzl", "py_binary")
 load(
     "@rules_haskell//haskell:private/haskell_impl.bzl",
     "haskell_toolchain_libraries",
@@ -9,6 +10,10 @@ load(
 load(
     "@rules_haskell//haskell:cabal_wrapper.bzl",
     "cabal_wrapper",
+)
+load(
+    "@rules_haskell//haskell:toolchain_info.bzl",
+    "haskell_toolchain_info",
 )
 
 exports_files(
@@ -98,4 +103,8 @@ config_setting(
     define_values = {
         "use_worker": "True",
     },
+)
+
+haskell_toolchain_info(
+    name = "toolchain_info",
 )

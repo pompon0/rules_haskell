@@ -183,7 +183,7 @@ def _haskell_proto_aspect_impl(target, ctx):
         files = struct(
             srcs = hs_files,
             _cc_toolchain = ctx.files._cc_toolchain,
-            extra_srcs = depset(),
+            extra_srcs = [],
         ),
         genfiles_dir = ctx.genfiles_dir,
         label = ctx.label,
@@ -195,7 +195,7 @@ def _haskell_proto_aspect_impl(target, ctx):
     # TODO this pattern match is very brittle. Let's not do this. The
     # order should match the order in the return value expression in
     # haskell_library_impl().
-    [hs_info, cc_info, coverage_info, default_info, library_info] = _haskell_library_impl(patched_ctx)
+    [hs_info, cc_info, coverage_info, default_info, library_info, output_groups] = _haskell_library_impl(patched_ctx)
 
     # Build haddock informations
     transitive_html = {}
@@ -232,6 +232,7 @@ def _haskell_proto_aspect_impl(target, ctx):
         # We can't return DefaultInfo here because target already provides that.
         HaskellProtobufInfo(files = default_info.files),
         haddock_info,
+        output_groups,
     ]
 
 _haskell_proto_aspect = aspect(
@@ -261,6 +262,7 @@ _haskell_proto_aspect = aspect(
         ),
     },
     toolchains = [
+        "@bazel_tools//tools/cpp:toolchain_type",
         "@rules_haskell//haskell:toolchain",
         "@rules_haskell//protobuf:toolchain",
         "@rules_sh//sh/posix:toolchain_type",
@@ -424,6 +426,6 @@ def haskell_proto_toolchain(
         toolchain_type = "@rules_haskell//protobuf:toolchain",
         toolchain = ":" + impl_name,
         exec_compatible_with = [
-            "@bazel_tools//platforms:x86_64",
+            "@platforms//cpu:x86_64",
         ],
     )

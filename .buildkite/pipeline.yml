@@ -1,8 +1,8 @@
 steps:
   - label: "Run tests (Nixpkgs)"
     command: |
-      . /var/lib/buildkite-agent/.nix-profile/etc/profile.d/nix.sh
       echo "build:ci --host_platform=@rules_haskell//haskell/platforms:linux_x86_64_nixpkgs" > .bazelrc.local
+      echo "build:ci --config=ci_linux" >> .bazelrc.local
       nix-shell --arg docTools false --pure --run '
       set -e
       # Ensure that the Nixpkgs bazel version matches the one specified in
@@ -10,12 +10,20 @@ steps:
       # `.buildkite/bindists-pipeline` for the bindists version.
       .buildkite/check-bazel-version
       ./tests/run-start-script.sh --use-nix
-      bazel build --config ci --config ci_linux //tests:run-tests
+      bazel build --config ci //tests:run-tests
       ./bazel-ci-bin/tests/run-tests
-      bazel coverage //tests/... --config ci --config ci_linux --build_tag_filters "coverage-compatible" --test_tag_filters "coverage-compatible" --test_output=all
+      bazel coverage //tests/... --config ci --build_tag_filters "coverage-compatible" --test_tag_filters "coverage-compatible" --test_output=all
       '
     timeout: 100
 
   - label: "Run tests (bindists)"
-    command: ".buildkite/bindists-pipeline"
+    command: |
+      mkdir -p "$HOME/bindists/repo_cache"
+      mkdir -p "$HOME/bindists/.cache/bazel"
+      mkdir -p "$HOME/bindists/.stack"
+      pushd .buildkite/image
+      echo "RUN useradd -ms /bin/bash --uid $(id -u buildkite-agent) buildkite-agent" >> Dockerfile
+      docker build . -t tweag/rules_haskell:latest
+      popd
+      docker run -it --network host -v $(pwd):/home/buildkite-agent/rules_haskell:rw -v $HOME/bindists/repo_cache:/home/buildkite-agent/repo_cache:rw -v $HOME/bindists/.cache/bazel:/home/buildkite-agent/.cache/bazel:rw -v $HOME/bindists/.stack:/home/buildkite-agent/.stack:rw --workdir /home/buildkite-agent/rules_haskell --user $(id -u buildkite-agent) tweag/rules_haskell:latest .buildkite/bindists-pipeline
     timeout: 100

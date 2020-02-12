@@ -5,7 +5,6 @@
 # https://bazel.build/roadmaps/platforms.html#replace---cpu-and---host_cpu-flags.
 build:windows --crosstool_top=@rules_haskell_ghc_windows_amd64//:cc_toolchain -s --verbose_failures --sandbox_debug
 
-build:ci_darwin --disk_cache=/tmp/bazel-disk-cache
 build:ci_linux --remote_http_cache=https://storage.googleapis.com/tweag-bazel-cache-buildkite --remote_upload_local_results=true --google_default_credentials
 build:ci --loading_phase_threads=1
 build:ci --verbose_failures
@@ -16,6 +15,11 @@ common:ci --color=no
 test:ci --test_output=errors
 
 # Note [backward compatible options]
+common:ci --incompatible_enable_cc_toolchain_resolution
+common:ci --incompatible_load_cc_rules_from_bzl
+# Blocked by https://github.com/bazelbuild/buildtools/issues/757
+#common:ci --incompatible_load_proto_rules_from_bzl
+common:ci --incompatible_load_python_rules_from_bzl
 
 # test environment does not propagate locales by default
 # some tests reads files written in UTF8, we need to propagate the correct

@@ -1,6 +1,7 @@
 load(":private/context.bzl", "haskell_context", "render_env")
 load(":cc.bzl", "cc_interop_info")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
+load("@rules_python//python:defs.bzl", "py_binary")
 
 def _cabal_wrapper_impl(ctx):
     hs = haskell_context(ctx)
@@ -12,7 +13,7 @@ def _cabal_wrapper_impl(ctx):
     # "/usr/bin/libtool". Since we call ar directly, override it.
     # TODO: remove this if Bazel fixes its behavior.
     # Upstream ticket: https://github.com/bazelbuild/bazel/issues/5127.
-    ar = cc_toolchain.ar_executable()
+    ar = cc_toolchain.ar_executable
     if ar.find("libtool") >= 0:
         ar = "/usr/bin/ar"
 
@@ -28,7 +29,7 @@ def _cabal_wrapper_impl(ctx):
             "%{runghc}": hs.tools.runghc.path,
             "%{ar}": ar,
             "%{cc}": hs_toolchain.cc_wrapper.executable.path,
-            "%{strip}": cc_toolchain.strip_executable(),
+            "%{strip}": cc_toolchain.strip_executable,
             "%{is_windows}": str(hs.toolchain.is_windows),
             "%{workspace}": ctx.workspace_name,
         },
@@ -52,7 +53,10 @@ _cabal_wrapper = rule(
             default = Label("@bazel_tools//tools/cpp:current_cc_toolchain"),
         ),
     },
-    toolchains = ["@rules_haskell//haskell:toolchain"],
+    toolchains = [
+        "@bazel_tools//tools/cpp:toolchain_type",
+        "@rules_haskell//haskell:toolchain",
+    ],
     fragments = ["cpp"],
 )
 
@@ -60,7 +64,7 @@ def cabal_wrapper(name, **kwargs):
     _cabal_wrapper(
         name = name + ".py",
     )
-    native.py_binary(
+    py_binary(
         name = name,
         srcs = [name + ".py"],
         python_version = "PY3",

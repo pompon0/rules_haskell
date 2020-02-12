@@ -1,5 +1,6 @@
 """Implementation of core Haskell rules"""
 
+load("@bazel_skylib//lib:dicts.bzl", "dicts")
 load(
     "@rules_haskell//haskell:providers.bzl",
     "C2hsLibraryInfo",
@@ -15,13 +16,17 @@ load(
     "list_exposed_modules",
 )
 load(
+    ":private/actions/info.bzl",
+    "compile_info_output_groups",
+    "library_info_output_groups",
+)
+load(
     ":private/actions/link.bzl",
     "link_binary",
     "link_library_dynamic",
     "link_library_static",
 )
 load(":private/actions/package.bzl", "package")
-load(":private/actions/repl.bzl", "build_haskell_repl")
 load(":private/actions/runghc.bzl", "build_haskell_runghc")
 load(":private/context.bzl", "haskell_context")
 load(":private/dependencies.bzl", "gather_dep_info")
@@ -255,26 +260,6 @@ def _haskell_binary_common_impl(ctx, is_test):
     target_files = depset([binary])
 
     user_compile_flags = _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
-    repl_ghci_args = _expand_make_variables("repl_ghci_args", ctx, ctx.attr.repl_ghci_args)
-    build_haskell_repl(
-        hs,
-        posix,
-        ghci_script = ctx.file._ghci_script,
-        ghci_repl_wrapper = ctx.file._ghci_repl_wrapper,
-        user_compile_flags = user_compile_flags,
-        repl_ghci_args = repl_ghci_args,
-        output = ctx.outputs.repl,
-        package_databases = dep_info.package_databases,
-        version = ctx.attr.version,
-        hs_info = hs_info,
-        cc_info = cc_info,
-    )
-
-    # XXX Temporary backwards compatibility hack. Remove eventually.
-    # See https://github.com/tweag/rules_haskell/pull/460.
-    ln(hs, posix, ctx.outputs.repl, ctx.outputs.repl_deprecated)
-
-    user_compile_flags = _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
     extra_args = _expand_make_variables("runcompile_flags", ctx, ctx.attr.runcompile_flags)
     build_haskell_runghc(
         hs,
@@ -355,6 +340,15 @@ def _haskell_binary_common_impl(ctx, is_test):
                 collect_data = True,
             ),
         ),
+        OutputGroupInfo(**compile_info_output_groups(
+            name = ctx.label.name,
+            workspace_name = ctx.workspace_name,
+            hs = hs,
+            c = c,
+            posix = posix,
+            cc_info = cc_info,
+            runfiles = ctx.runfiles(collect_data = True).files,
+        )),
     ]
 
 def haskell_library_impl(ctx):
@@ -540,27 +534,6 @@ def haskell_library_impl(ctx):
     target_files = depset([file for file in [static_library, dynamic_library] if file])
 
     if hasattr(ctx, "outputs"):
-        user_compile_flags = _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
-        repl_ghci_args = _expand_make_variables("repl_ghci_args", ctx, ctx.attr.repl_ghci_args)
-        build_haskell_repl(
-            hs,
-            posix,
-            ghci_script = ctx.file._ghci_script,
-            ghci_repl_wrapper = ctx.file._ghci_repl_wrapper,
-            repl_ghci_args = repl_ghci_args,
-            user_compile_flags = user_compile_flags,
-            output = ctx.outputs.repl,
-            package_databases = dep_info.package_databases,
-            version = ctx.attr.version,
-            hs_info = hs_info,
-            cc_info = cc_info,
-            lib_info = lib_info,
-        )
-
-        # XXX Temporary backwards compatibility hack. Remove eventually.
-        # See https://github.com/tweag/rules_haskell/pull/460.
-        ln(hs, posix, ctx.outputs.repl, ctx.outputs.repl_deprecated)
-
         extra_args = _expand_make_variables("runcompile_flags", ctx, ctx.attr.runcompile_flags)
         user_compile_flags = _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
         build_haskell_runghc(
@@ -634,6 +607,26 @@ def haskell_library_impl(ctx):
         coverage_info,
         default_info,
         lib_info,
+        OutputGroupInfo(**dicts.add(
+            compile_info_output_groups(
+                # For haskell_proto_aspect, which doesn't have a ctx.workspace_name,
+                # just set it to "".  It won't matter in practice because those rules don't
+                # have runfiles and won't be compiled directly anyway.
+                workspace_name = getattr(ctx, "workspace_name", ""),
+                hs = hs,
+                name = ctx.label.name,
+                c = c,
+                posix = posix,
+                cc_info = cc_info,
+                runfiles = default_info.default_runfiles.files if getattr(default_info, "default_runfiles", None) else depset(),
+            ),
+            library_info_output_groups(
+                name = ctx.label.name,
+                hs = hs,
+                hs_info = hs_info,
+                lib_info = lib_info,
+            ),
+        )),
     ]
 
 # We should not need this provider. It exists purely as a workaround
@@ -645,6 +638,7 @@ HaskellImportHack = provider()
 HaskellToolchainLibraries = provider()
 
 def haskell_toolchain_library_impl(ctx):
+    hs = haskell_context(ctx)
     if ctx.attr.package:
         package = ctx.attr.package
     else:
@@ -670,6 +664,12 @@ The following toolchain libraries are available:
         target.cc_info,
         target.haddock_info,
         HaskellToolchainLibraryInfo(),
+        OutputGroupInfo(**library_info_output_groups(
+            hs = hs,
+            name = ctx.label.name,
+            hs_info = target.hs_info,
+            lib_info = target.hs_lib_info,
+        )),
     ]
 
 def haskell_toolchain_libraries_impl(ctx):
@@ -797,6 +797,7 @@ haskell_toolchain_libraries = rule(
         ),
     },
     toolchains = [
+        "@bazel_tools//tools/cpp:toolchain_type",
         "@rules_haskell//haskell:toolchain",
     ],
     fragments = ["cpp"],
