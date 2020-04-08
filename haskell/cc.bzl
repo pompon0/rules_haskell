@@ -9,9 +9,11 @@ load(
     "C_COMPILE_ACTION_NAME",
 )
 load(
-    "@rules_haskell//haskell:providers.bzl",
+    "//haskell:providers.bzl",
+    "GhcPluginInfo",
     "HaskellInfo",
 )
+load(":private/cc_libraries.bzl", "deps_HaskellCcLibrariesInfo", "get_cc_libraries")
 
 CcInteropInfo = provider(
     doc = "Information needed for interop with cc rules.",
@@ -26,6 +28,10 @@ CcInteropInfo = provider(
         "compiler_flags": "Flags for compilation",
         "linker_flags": "Flags to forward to the linker",
         "include_args": "Extra include dirs",
+        "cc_libraries_info": "HaskellCcLibrariesInfo",
+        "cc_libraries": "depset, C libraries from direct linking dependencies.",
+        "transitive_libraries": "depset, C and Haskell libraries from transitive linking dependencies.",
+        "plugin_libraries": "depset, C and Haskell libraries from transitive plugin dependencies.",
     },
 )
 
@@ -125,6 +131,9 @@ def cc_interop_info(ctx):
     if tools["ar"].find("libtool") >= 0:
         tools["ar"] = "/usr/bin/ar"
 
+    cc_libraries_info = deps_HaskellCcLibrariesInfo(
+        ctx.attr.deps + getattr(ctx.attr, "plugins", []),
+    )
     return CcInteropInfo(
         tools = struct(**tools),
         files = cc_files,
@@ -137,4 +146,46 @@ def cc_interop_info(ctx):
         # but this will anyways all be replaced (once implemented) by
         # https://github.com/bazelbuild/bazel/issues/4571.
         linker_flags = linker_flags,
+        cc_libraries_info = cc_libraries_info,
+        cc_libraries = get_cc_libraries(cc_libraries_info, cc_common.merge_cc_infos(cc_infos = ccs).linking_context.libraries_to_link.to_list()),
+        transitive_libraries = cc_common.merge_cc_infos(cc_infos = [
+            dep[CcInfo]
+            for dep in ctx.attr.deps
+            if CcInfo in dep
+        ]).linking_context.libraries_to_link.to_list(),
+        plugin_libraries = cc_common.merge_cc_infos(cc_infos = [
+            dep[CcInfo]
+            for plugin in getattr(ctx.attr, "plugins", [])
+            for dep in plugin[GhcPluginInfo].deps
+            if CcInfo in dep
+        ]).linking_context.libraries_to_link.to_list(),
     )
+
+def ghc_cc_program_args(cc):
+    """Returns the -pgm* flags required to override cc.
+
+    Args:
+      cc: string, path to the C compiler (cc_wrapper).
+
+    Returns:
+      list of string, GHC arguments.
+    """
+    return [
+        # GHC uses C compiler for assemly, linking and preprocessing as well.
+        "-pgma",
+        cc,
+        "-pgmc",
+        cc,
+        "-pgml",
+        cc,
+        "-pgmP",
+        cc,
+        # Setting -pgm* flags explicitly has the unfortunate side effect
+        # of resetting any program flags in the GHC settings file. So we
+        # restore them here. See
+        # https://ghc.haskell.org/trac/ghc/ticket/7929.
+        "-optc-fno-stack-protector",
+        "-optP-E",
+        "-optP-undef",
+        "-optP-traditional",
+    ]

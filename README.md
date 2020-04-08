@@ -190,6 +190,66 @@ protects against this problem. If sandboxing is not an option, simply
 put the source files for each target in a separate directory (you can
 still use a single `BUILD` file to define all targets).
 
+### hGetContents: invalid argument (invalid byte sequence)
+
+If you are using the GHC bindists and see an error message like this:
+
+```
+haddock: internal error: /tmp/tmputn68mya/doc/html/path-io/haddock-response300-1.txt: hGetContents: invalid argument (invalid byte sequence)
+```
+
+It means that the default locale (`C.UTF-8`) does not work on your system.
+You can use a locale that your system has. For example, if your system has the
+locale `en_US.UTF-8`, you can specify that locale:
+
+```bzl
+rules_haskell_toolchains(
+    locale = "en_US.UTF-8", # <----
+    version = "8.4.1",
+)
+```
+
+To find available locales, run `locale -a` in a terminal. You should see output like the following:
+
+```console
+$ locale -a
+C
+en_US
+en_US.iso88591
+en_US.utf8
+POSIX
+```
+
+### MacOS: Error: DEVELOPER_DIR not set.
+
+Make sure to set the following environment variable:
+```
+export BAZEL_USE_CPP_ONLY_TOOLCHAIN=1
+```
+This ensures that Bazel picks the correct C compiler.
+
+### Windows: Incorrect `cc_toolchain` used
+
+If you're using Windows, bazel might use a different `cc_toolchain`
+than is required to build. This might happen if the environment has a
+`cc_toolchain` from Visual Studio. This might show up with an error like:
+```
+Traceback (most recent call last):
+  File "\\?\C:\Users\appveyor\AppData\Local\Temp\1\Bazel.runfiles_w5rfpqk5\runfiles\rules_haskell\haskell\cabal_wrapper.py", line 105, in <module>
+    strip = find_exe("external/local_config_cc/wrapper/bin/msvc_nop.bat")
+  File "\\?\C:\Users\appveyor\AppData\Local\Temp\1\Bazel.runfiles_w5rfpqk5\runfiles\rules_haskell\haskell\cabal_wrapper.py", line 56, in find_exe
+    if not os.path.isfile(path) and "True" == "True":
+  File "C:\Python37\lib\genericpath.py", line 30, in isfile
+    st = os.stat(path)
+TypeError: stat: path should be string, bytes, os.PathLike or integer, not NoneType
+```
+
+You can override the `cc_toolchain` chosen with the following flag:
+```
+--crosstool_top=@rules_haskell_ghc_windows_amd64//:cc_toolchain
+```
+This chooses the `cc_toolchain` bundled with GHC.
+
 ## For `rules_haskell` developers
 
 ### Saving common command-line flags to a file

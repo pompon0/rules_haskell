@@ -10,7 +10,6 @@ load("@bazel_skylib//lib:paths.bzl", "paths")
 load(
     ":private/path_utils.bzl",
     "declare_compiled",
-    "link_libraries",
     "module_name",
     "target_unique_name",
 )
@@ -20,7 +19,11 @@ load(
     ":providers.bzl",
     "HaskellLibraryInfo",
     "all_dependencies_package_ids",
-    "get_ghci_extra_libs",
+)
+load(
+    ":private/cc_libraries.bzl",
+    "get_ghci_library_files",
+    "link_libraries",
 )
 load(":private/set.bzl", "set")
 
@@ -86,7 +89,7 @@ def _process_hsc_file(hs, cc, hsc_flags, hsc_inputs, hsc_file):
 
     return hs_out, idir
 
-def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, cc_info, srcs, import_dir_map, extra_srcs, user_compile_flags, with_profiling, my_pkg_id, version, plugins, preprocessors):
+def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, srcs, import_dir_map, extra_srcs, user_compile_flags, with_profiling, my_pkg_id, version, plugins, preprocessors):
     """Compute variables common to all compilation targets (binary and library).
 
     Returns:
@@ -149,12 +152,6 @@ def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, cc_inf
     compile_flags += hs.toolchain.compiler_flags
     compile_flags += user_compile_flags
 
-    # Work around macOS linker limits.  This fix has landed in GHC HEAD, but is
-    # not yet in a release; plus, we still want to support older versions of
-    # GHC.  For details, see: https://phabricator.haskell.org/D4714
-    if hs.toolchain.is_darwin:
-        compile_flags += ["-optl-Wl,-dead_strip_dylibs"]
-
     package_ids = []
     for plugin in plugins:
         package_ids.extend(all_dependencies_package_ids(plugin.deps))
@@ -216,8 +213,6 @@ def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, cc_inf
         if s in import_dir_map:
             idir = import_dir_map[s]
             set.mutable_insert(import_dirs, idir)
-
-    compile_flags += ["-i{0}".format(d) for d in set.to_list(import_dirs)]
 
     # Write the -optP flags to a parameter file because they can be very long on Windows
     # e.g. 27Kb for grpc-haskell
@@ -320,8 +315,10 @@ def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, cc_inf
     )
 
     # Transitive library dependencies for runtime.
-    (ghci_extra_libs, ghc_env) = get_ghci_extra_libs(hs, posix, cc_info)
-    link_libraries(ghci_extra_libs, args)
+    link_libraries(
+        get_ghci_library_files(hs, cc.cc_libraries_info, cc.cc_libraries),
+        args,
+    )
 
     return struct(
         args = args,
@@ -338,7 +335,7 @@ def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, cc_inf
             plugin_dep_info.interface_dirs,
             plugin_dep_info.static_libraries,
             plugin_dep_info.dynamic_libraries,
-            ghci_extra_libs,
+            depset(get_ghci_library_files(hs, cc.cc_libraries_info, cc.transitive_libraries + cc.plugin_libraries)),
             java.inputs,
             preprocessors.inputs,
             plugin_tool_inputs,
@@ -351,7 +348,6 @@ def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, cc_inf
         extra_source_files = extra_source_files,
         import_dirs = import_dirs,
         env = dicts.add(
-            ghc_env,
             java.env,
             hs.env,
         ),
@@ -375,7 +371,6 @@ def compile_binary(
         posix,
         dep_info,
         plugin_dep_info,
-        cc_info,
         srcs,
         ls_modules,
         import_dir_map,
@@ -397,7 +392,7 @@ def compile_binary(
         modules: set of module names
         source_files: set of Haskell source files
     """
-    c = _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, cc_info, srcs, import_dir_map, extra_srcs, user_compile_flags, with_profiling, my_pkg_id = None, version = version, plugins = plugins, preprocessors = preprocessors)
+    c = _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, srcs, import_dir_map, extra_srcs, user_compile_flags, with_profiling, my_pkg_id = None, version = version, plugins = plugins, preprocessors = preprocessors)
     c.args.add_all(["-main-is", main_function])
     if dynamic:
         # For binaries, GHC creates .o files even for code to be
@@ -442,7 +437,6 @@ def compile_library(
         posix,
         dep_info,
         plugin_dep_info,
-        cc_info,
         srcs,
         import_dir_map,
         extra_srcs,
@@ -465,7 +459,7 @@ def compile_library(
         source_files: set of Haskell module files
         import_dirs: import directories that should make all modules visible (for GHCi)
     """
-    c = _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, cc_info, srcs, import_dir_map, extra_srcs, user_compile_flags, with_profiling, my_pkg_id = my_pkg_id, version = my_pkg_id.version, plugins = plugins, preprocessors = preprocessors)
+    c = _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, srcs, import_dir_map, extra_srcs, user_compile_flags, with_profiling, my_pkg_id = my_pkg_id, version = my_pkg_id.version, plugins = plugins, preprocessors = preprocessors)
     if with_shared:
         c.args.add("-dynamic-too")
 

@@ -9,8 +9,15 @@ load(":private/context.bzl", "haskell_context", "render_env")
 load(":private/dependencies.bzl", "gather_dep_info")
 load(":private/expansions.bzl", "expand_make_variables")
 load(":private/mode.bzl", "is_profiling_enabled")
-load(":private/path_utils.bzl", "join_path_list", "truly_relativize")
+load(
+    ":private/path_utils.bzl",
+    "create_rpath_entry",
+    "join_path_list",
+    "relative_rpath_prefix",
+    "truly_relativize",
+)
 load(":private/set.bzl", "set")
+load(":private/typing.bzl", "typecheck_stackage_extradeps")
 load(":haddock.bzl", "generate_unified_haddock_info")
 load(
     ":private/workspace_utils.bzl",
@@ -21,7 +28,14 @@ load(
     "HaddockInfo",
     "HaskellInfo",
     "HaskellLibraryInfo",
-    "get_ghci_extra_libs",
+)
+load(
+    ":private/cc_libraries.bzl",
+    "deps_HaskellCcLibrariesInfo",
+    "get_cc_libraries",
+    "get_ghci_library_files",
+    "get_library_files",
+    "haskell_cc_libraries_aspect",
 )
 
 def _so_extension(hs):
@@ -98,7 +112,30 @@ def _cabal_tool_flag(tool):
 def _binary_paths(binaries):
     return [binary.dirname for binary in binaries.to_list()]
 
-def _prepare_cabal_inputs(hs, cc, posix, dep_info, cc_info, direct_cc_info, component, package_id, tool_inputs, tool_input_manifests, cabal, setup, srcs, compiler_flags, flags, generate_haddock, cabal_wrapper, package_database, verbose):
+def _concat(sequences):
+    return [item for sequence in sequences for item in sequence]
+
+def _prepare_cabal_inputs(
+        hs,
+        cc,
+        posix,
+        dep_info,
+        cc_info,
+        direct_cc_info,
+        component,
+        package_id,
+        tool_inputs,
+        tool_input_manifests,
+        cabal,
+        setup,
+        srcs,
+        compiler_flags,
+        flags,
+        generate_haddock,
+        cabal_wrapper,
+        package_database,
+        verbose,
+        dynamic_binary = None):
     """Compute Cabal wrapper, arguments, inputs."""
     with_profiling = is_profiling_enabled(hs)
 
@@ -106,9 +143,28 @@ def _prepare_cabal_inputs(hs, cc, posix, dep_info, cc_info, direct_cc_info, comp
     # already covered by their corresponding package-db entries. We only need
     # to add libraries and headers for direct C library dependencies to the
     # command line.
-    (direct_libs, _) = get_ghci_extra_libs(hs, posix, direct_cc_info)
-    (transitive_libs, env) = get_ghci_extra_libs(hs, posix, cc_info)
-    env.update(**hs.env)
+    direct_libs = get_ghci_library_files(hs, cc.cc_libraries_info, cc.cc_libraries)
+
+    # The regular Haskell rules perform mostly static linking, i.e. where
+    # possible all C library dependencies are linked statically. Cabal has no
+    # such mode, and since we have to provide dynamic C libraries for
+    # compilation, they will also be used for linking. Hence, we need to add
+    # RUNPATH flags for all dynamic C library dependencies.
+    (_, dynamic_libs) = get_library_files(
+        hs,
+        cc.cc_libraries_info,
+        get_cc_libraries(cc.cc_libraries_info, cc.transitive_libraries),
+        dynamic = True,
+    )
+
+    # The regular Haskell rules have separate actions for linking and
+    # compilation to which we pass different sets of libraries as inputs. The
+    # Cabal rules, in contrast, only have a single action for compilation and
+    # linking, so we must provide both sets of libraries as inputs to the same
+    # action.
+    transitive_compile_libs = get_ghci_library_files(hs, cc.cc_libraries_info, cc.transitive_libraries)
+    transitive_link_libs = _concat(get_library_files(hs, cc.cc_libraries_info, cc.transitive_libraries))
+    env = dict(hs.env)
     env["PATH"] = join_path_list(hs, _binary_paths(tool_inputs) + posix.paths)
     if hs.toolchain.is_darwin:
         env["SDKROOT"] = "macosx"  # See haskell/private/actions/link.bzl
@@ -124,10 +180,23 @@ def _prepare_cabal_inputs(hs, cc, posix, dep_info, cc_info, direct_cc_info, comp
         direct_cc_info.compilation_context.quote_includes,
         direct_cc_info.compilation_context.system_includes,
     ])
-    direct_lib_dirs = [file.dirname for file in direct_libs.to_list()]
+    direct_lib_dirs = [file.dirname for file in direct_libs]
     args.add_all([component, package_id, generate_haddock, setup, cabal.dirname, package_database.dirname])
     args.add("--flags=" + " ".join(flags))
     args.add_all(compiler_flags, format_each = "--ghc-option=%s")
+    if dynamic_binary:
+        args.add_all(
+            [
+                "--ghc-option=-optl-Wl,-rpath," + create_rpath_entry(
+                    binary = dynamic_binary,
+                    dependency = lib,
+                    keep_filename = False,
+                    prefix = relative_rpath_prefix(hs.toolchain.is_darwin),
+                )
+                for lib in dynamic_libs
+            ],
+            uniquify = True,
+        )
     args.add("--")
     args.add_all(package_databases, map_each = _dirname, format_each = "--package-db=%s")
     args.add_all(direct_include_dirs, format_each = "--extra-include-dirs=%s")
@@ -145,7 +214,8 @@ def _prepare_cabal_inputs(hs, cc, posix, dep_info, cc_info, direct_cc_info, comp
             depset(cc.files),
             package_databases,
             transitive_headers,
-            transitive_libs,
+            depset(transitive_compile_libs),
+            depset(transitive_link_libs),
             dep_info.interface_dirs,
             dep_info.static_libraries,
             dep_info.dynamic_libraries,
@@ -160,6 +230,7 @@ def _prepare_cabal_inputs(hs, cc, posix, dep_info, cc_info, direct_cc_info, comp
         inputs = inputs,
         input_manifests = input_manifests,
         env = env,
+        runfiles = depset(direct = dynamic_libs),
     )
 
 def _haskell_cabal_library_impl(ctx):
@@ -181,8 +252,9 @@ def _haskell_cabal_library_impl(ctx):
         ],
     )
     posix = ctx.toolchains["@rules_sh//sh/posix:toolchain_type"]
+    package_name = ctx.attr.package_name if ctx.attr.package_name else hs.label.name
     package_id = "{}-{}".format(
-        ctx.attr.package_name if ctx.attr.package_name else hs.label.name,
+        package_name,
         ctx.attr.version,
     )
     with_profiling = is_profiling_enabled(hs)
@@ -204,7 +276,7 @@ def _haskell_cabal_library_impl(ctx):
     )
     if ctx.attr.haddock:
         haddock_file = hs.actions.declare_file(
-            "_install/{}_haddock/{}.haddock".format(package_id, ctx.attr.name),
+            "_install/{}_haddock/{}.haddock".format(package_id, package_name),
             sibling = cabal,
         )
         haddock_html_dir = hs.actions.declare_directory(
@@ -255,6 +327,7 @@ def _haskell_cabal_library_impl(ctx):
         cabal_wrapper = ctx.executable._cabal_wrapper,
         package_database = package_database,
         verbose = ctx.attr.verbose,
+        dynamic_binary = dynamic_library,
     )
     outputs = [
         package_database,
@@ -366,7 +439,9 @@ haskell_cabal_library = rule(
             doc = "Whether to generate haddock documentation.",
         ),
         "srcs": attr.label_list(allow_files = True),
-        "deps": attr.label_list(),
+        "deps": attr.label_list(
+            aspects = [haskell_cc_libraries_aspect],
+        ),
         "compiler_flags": attr.string_list(
             doc = """Flags to pass to Haskell compiler, in addition to those defined
             the cabal file. Subject to Make variable substitution.""",
@@ -399,10 +474,11 @@ haskell_cabal_library = rule(
         "@rules_sh//sh/posix:toolchain_type",
     ],
     fragments = ["cpp"],
-)
-"""Use Cabal to build a library.
+    doc = """\
+Use Cabal to build a library.
 
-Example:
+### Examples
+
   ```bzl
   haskell_cabal_library(
       name = "lib-0.1.0.0",
@@ -427,7 +503,8 @@ A `haskell_cabal_library` can be substituted for any
 However, using a plain `haskell_library` sometimes leads to better
 build times, and does not require drafting a `.cabal` file.
 
-"""
+""",
+)
 
 def _haskell_cabal_binary_impl(ctx):
     hs = haskell_context(ctx)
@@ -492,6 +569,7 @@ def _haskell_cabal_binary_impl(ctx):
         cabal_wrapper = ctx.executable._cabal_wrapper,
         package_database = package_database,
         verbose = ctx.attr.verbose,
+        dynamic_binary = binary,
     )
     ctx.actions.run(
         executable = c.cabal_wrapper,
@@ -525,6 +603,7 @@ def _haskell_cabal_binary_impl(ctx):
         executable = binary,
         runfiles = ctx.runfiles(
             files = [data_dir],
+            transitive_files = c.runfiles,
             collect_default = True,
         ),
     )
@@ -536,10 +615,11 @@ haskell_cabal_binary = rule(
     executable = True,
     attrs = {
         "srcs": attr.label_list(allow_files = True),
-        "deps": attr.label_list(),
         "version": attr.string(
             doc = "Version of the Cabal package.",
             mandatory = True,
+        "deps": attr.label_list(
+            aspects = [haskell_cc_libraries_aspect],
         ),
         "compiler_flags": attr.string_list(
             doc = """Flags to pass to Haskell compiler, in addition to those defined
@@ -572,10 +652,11 @@ haskell_cabal_binary = rule(
         "@rules_sh//sh/posix:toolchain_type",
     ],
     fragments = ["cpp"],
-)
-"""Use Cabal to build a binary.
+    doc = """\
+Use Cabal to build a binary.
 
-Example:
+### Examples
+
   ```bzl
   haskell_cabal_binary(
       name = "happy",
@@ -591,7 +672,8 @@ This rule does not use `cabal-install`. It calls the package's
 All sources files that would have been part of a Cabal sdist need to
 be listed in `srcs` (crucially, including the `.cabal` file).
 
-"""
+""",
+)
 
 # Temporary hardcoded list of core libraries. This will no longer be
 # necessary once Stack 2.0 is released.
@@ -1096,6 +1178,64 @@ _fetch_stack = repository_rule(
 def stack_snapshot(stack = None, extra_deps = {}, vendored_packages = {}, **kwargs):
     """Use Stack to download and extract Cabal source distributions.
 
+    This rule will use Stack to compute the transitive closure of the
+    subset of the given snapshot listed in the `packages` attribute, and
+    generate a dependency graph. If a package in the closure depends on
+    system libraries or other external libraries, use the `extra_deps`
+    attribute to list them. This attribute works like the
+    `--extra-{include,lib}-dirs` flags for Stack and cabal-install do.
+
+    Packages that are in the snapshot need not have their versions
+    specified. But any additional packages or version overrides will have
+    to be specified with a package identifier of the form
+    `<package>-<version>` in the `packages` attribute.
+
+    In the external repository defined by the rule, all given packages are
+    available as top-level targets named after each package. Additionally, the
+    dependency graph is made available within `packages.bzl` as the `dict`
+    `packages` mapping unversioned package names to structs holding the fields
+      - name: The unversioned package name.
+      - version: The package version.
+      - deps: The list of package dependencies according to stack.
+      - flags: The list of Cabal flags.
+
+    ### Examples
+
+      ```bzl
+      stack_snapshot(
+          name = "stackage",
+          packages = ["conduit", "lens", "zlib-0.6.2"],
+          vendored_packages = {"split": "//split:split"},
+          tools = ["@happy//:happy", "@c2hs//:c2hs"],
+          snapshot = "lts-13.15",
+          extra_deps = {"zlib": ["@zlib.dev//:zlib"]},
+      )
+      ```
+      defines `@stackage//:conduit`, `@stackage//:lens`,
+      `@stackage//:zlib` library targets.
+
+      Alternatively
+
+      ```bzl
+      stack_snapshot(
+          name = "stackage",
+          packages = ["conduit", "lens", "zlib"],
+          flags = {"zlib": ["-non-blocking-ffi"]},
+          tools = ["@happy//:happy", "@c2hs//:c2hs"],
+          local_Snapshot = "//:snapshot.yaml",
+          extra_deps = {"zlib": ["@zlib.dev//:zlib"]},
+      ```
+
+      Does the same as the previous example, provided there is a
+      `snapshot.yaml`, at the root of the repository with content
+
+      ```yaml
+      resolver: lts-13.15
+
+      packages:
+        - zlib-0.6.2
+      ```
+
     Args:
       snapshot: The name of a Stackage snapshot. Incompatible with local_snapshot.
       local_snapshot: A custom Stack snapshot file, as per the Stack documentation.
@@ -1120,62 +1260,8 @@ def stack_snapshot(stack = None, extra_deps = {}, vendored_packages = {}, **kwar
       tools: Tool dependencies. They are built using the host configuration, since
         the tools are executed as part of the build.
       stack: The stack binary to use to enumerate package dependencies.
-
-    Examples:
-
-      ```bzl
-      stack_snapshot(
-          name = "stackage",
-          packages = ["conduit", "lens", "zlib-0.6.2"],
-          vendored_packages = {"split": "//split:split"},
-          tools = ["@happy//:happy", "@c2hs//:c2hs"],
-          snapshot = "lts-13.15",
-          extra_deps = {"zlib": ["@zlib.dev//:zlib"]},
-      )
-      ```
-      defines `@stackage//:conduit`, `@stackage//:lens`,
-      `@stackage//:zlib` library targets.
-
-      Alternatively
-      ```bzl
-      stack_snapshot(
-          name = "stackage",
-          packages = ["conduit", "lens", "zlib"],
-          flags = {"zlib": ["-non-blocking-ffi"]},
-          tools = ["@happy//:happy", "@c2hs//:c2hs"],
-          local_Snapshot = "//:snapshot.yaml",
-          extra_deps = {"zlib": ["@zlib.dev//:zlib"]},
-      ```
-      Does the same as the previous example, provided there is a
-      `snapshot.yaml`, at the root of the repository with content
-      ```yaml
-      resolver: lts-13.15
-
-      packages:
-        - zlib-0.6.2
-      ```
-
-    This rule will use Stack to compute the transitive closure of the
-    subset of the given snapshot listed in the `packages` attribute, and
-    generate a dependency graph. If a package in the closure depends on
-    system libraries or other external libraries, use the `extra_deps`
-    attribute to list them. This attribute works like the
-    `--extra-{include,lib}-dirs` flags for Stack and cabal-install do.
-
-    Packages that are in the snapshot need not have their versions
-    specified. But any additional packages or version overrides will have
-    to be specified with a package identifier of the form
-    `<package>-<version>` in the `packages` attribute.
-
-    In the external repository defined by the rule, all given packages are
-    available as top-level targets named after each package. Additionally, the
-    dependency graph is made available within `packages.bzl` as the `dict`
-    `packages` mapping unversioned package names to structs holding the fields
-      - name: The unversioned package name.
-      - version: The package version.
-      - deps: The list of package dependencies according to stack.
-      - flags: The list of Cabal flags.
     """
+    typecheck_stackage_extradeps(extra_deps)
     if not stack:
         _fetch_stack(name = "rules_haskell_stack")
         stack = Label("@rules_haskell_stack//:stack")
