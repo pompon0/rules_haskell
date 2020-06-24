@@ -3,11 +3,11 @@
 # Checks the version of Bazel found in the PATH, and then initializes
 # a new Bazel workspace with dummy Haskell build targets.
 
-MIN_BAZEL_MAJOR=0
-MIN_BAZEL_MINOR=29
+MIN_BAZEL_MAJOR=2
+MIN_BAZEL_MINOR=1
 
 MAX_BAZEL_MAJOR=2
-MAX_BAZEL_MINOR=0
+MAX_BAZEL_MINOR=1
 
 set -e
 
@@ -143,7 +143,6 @@ haskell_register_ghc_nixpkgs(
 EOF
 )
 
-declare -r ALEX_BUILD_FILE="alex.BUILD.bazel"
 declare -r ZLIB_BUILD_FILE="zlib.BUILD.bazel"
 
 echo "Creating $ZLIB_BUILD_FILE" >&2
@@ -263,17 +262,6 @@ load(
     "rules_haskell_toolchains",
 )
 
-# Download alex and make it accessible as @alex.
-# Delete this block, alex.BUILD.bazel, and the reference in
-# stack_snapshot's tools if you don't use alex.
-http_archive(
-    name = "alex",
-    build_file = "//:$ALEX_BUILD_FILE",
-    sha256 = "d58e4d708b14ff332a8a8edad4fa8989cb6a9f518a7c6834e96281ac5f8ff232",
-    strip_prefix = "alex-3.2.4",
-    urls = ["http://hackage.haskell.org/package/alex-3.2.4/alex-3.2.4.tar.gz"],
-)
-
 load(
     "@rules_haskell//haskell:cabal.bzl",
     "stack_snapshot"
@@ -283,7 +271,6 @@ stack_snapshot(
     name = "stackage",
     extra_deps = {"zlib": ["@zlib.dev//:zlib"]},
     packages = ["zlib"],
-    tools = [ "@alex" ],
     snapshot = "lts-14.27", # Last snapshot published for ghc-8.6.5
     # the default version picked up by rules_haskell
 )
@@ -291,18 +278,6 @@ stack_snapshot(
 $(get_toolchain)
 
 $(get_zlib)
-EOF
-
-echo "Creating $ALEX_BUILD_FILE" >&2
-cat > "$ALEX_BUILD_FILE" <<EOF
-load("@rules_haskell//haskell:cabal.bzl", "haskell_cabal_binary")
-
-haskell_cabal_binary(
-    name = "alex",
-    srcs = glob(["**"]),
-    verbose = False,
-    visibility = ["//visibility:public"],
-)
 EOF
 
 echo "Creating .bazelrc" >&2
@@ -316,8 +291,8 @@ test:ci --test_output=errors
 $(insert_if_equal $mode "nix" '
 # This project uses a GHC provisioned via nix.
 # We need to use the rules_haskell nix toolchain accordingly:
-build --host_platform=@rules_haskell//haskell/platforms:linux_x86_64_nixpkgs
-run --host_platform=@rules_haskell//haskell/platforms:linux_x86_64_nixpkgs'
+build --host_platform=@io_tweag_rules_nixpkgs//nixpkgs/platforms:host
+run --host_platform=@io_tweag_rules_nixpkgs//nixpkgs/platforms:host'
 )
 
 # test environment does not propagate locales by default

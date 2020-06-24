@@ -329,12 +329,10 @@ def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, srcs, 
             depset(cc.hdrs),
             dep_info.package_databases,
             dep_info.interface_dirs,
-            dep_info.static_libraries,
-            dep_info.dynamic_libraries,
+            dep_info.hs_libraries,
             plugin_dep_info.package_databases,
             plugin_dep_info.interface_dirs,
-            plugin_dep_info.static_libraries,
-            plugin_dep_info.dynamic_libraries,
+            plugin_dep_info.hs_libraries,
             depset(get_ghci_library_files(hs, cc.cc_libraries_info, cc.transitive_libraries + cc.plugin_libraries)),
             java.inputs,
             preprocessors.inputs,
@@ -354,7 +352,7 @@ def _compilation_defaults(hs, cc, java, posix, dep_info, plugin_dep_info, srcs, 
     )
 
 def _hpc_compiler_args(hs):
-    hpcdir = "{}/{}/.hpc".format(hs.bin_dir.path, hs.package_root)
+    hpcdir = "{}/{}/{}_.hpc".format(hs.bin_dir.path, hs.package_root, hs.name)
     return ["-fhpc", "-hpcdir", hpcdir]
 
 def _coverage_datum(mix_file, src_file, target_label):
@@ -406,7 +404,7 @@ def compile_binary(
         c.args.add_all(_hpc_compiler_args(hs))
         for src_file in srcs:
             module = module_name(hs, src_file)
-            mix_file = hs.actions.declare_file(".hpc/{module}.mix".format(module = module))
+            mix_file = hs.actions.declare_file("{name}_.hpc/{module}.mix".format(name = hs.name, module = module))
             coverage_data.append(_coverage_datum(mix_file, src_file, hs.label))
 
     hs.toolchain.actions.run_ghc(
@@ -469,7 +467,7 @@ def compile_library(
         for src_file in srcs:
             pkg_id_string = pkg_id.to_string(my_pkg_id)
             module = module_name(hs, src_file)
-            mix_file = hs.actions.declare_file(".hpc/{pkg}/{module}.mix".format(pkg = pkg_id_string, module = module))
+            mix_file = hs.actions.declare_file("{name}_.hpc/{pkg}/{module}.mix".format(name = hs.name, pkg = pkg_id_string, module = module))
             coverage_data.append(_coverage_datum(mix_file, src_file, hs.label))
 
     if srcs:

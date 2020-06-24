@@ -32,6 +32,7 @@ CcInteropInfo = provider(
         "cc_libraries": "depset, C libraries from direct linking dependencies.",
         "transitive_libraries": "depset, C and Haskell libraries from transitive linking dependencies.",
         "plugin_libraries": "depset, C and Haskell libraries from transitive plugin dependencies.",
+        "setup_libraries": "depset, C and Haskell libraries from Cabal setup dependencies.",
     },
 )
 
@@ -132,7 +133,7 @@ def cc_interop_info(ctx):
         tools["ar"] = "/usr/bin/ar"
 
     cc_libraries_info = deps_HaskellCcLibrariesInfo(
-        ctx.attr.deps + getattr(ctx.attr, "plugins", []),
+        ctx.attr.deps + getattr(ctx.attr, "plugins", []) + getattr(ctx.attr, "setup_deps", []),
     )
     return CcInteropInfo(
         tools = struct(**tools),
@@ -159,6 +160,11 @@ def cc_interop_info(ctx):
             for dep in plugin[GhcPluginInfo].deps
             if CcInfo in dep
         ]).linking_context.libraries_to_link.to_list(),
+        setup_libraries = cc_common.merge_cc_infos(cc_infos = [
+            dep[CcInfo]
+            for dep in getattr(ctx.attr, "setup_deps", [])
+            if CcInfo in dep
+        ]).linking_context.libraries_to_link.to_list(),
     )
 
 def ghc_cc_program_args(cc):
@@ -170,7 +176,7 @@ def ghc_cc_program_args(cc):
     Returns:
       list of string, GHC arguments.
     """
-    return [
+    args = [
         # GHC uses C compiler for assemly, linking and preprocessing as well.
         "-pgma",
         cc,
@@ -178,14 +184,19 @@ def ghc_cc_program_args(cc):
         cc,
         "-pgml",
         cc,
-        "-pgmP",
-        cc,
         # Setting -pgm* flags explicitly has the unfortunate side effect
         # of resetting any program flags in the GHC settings file. So we
         # restore them here. See
         # https://ghc.haskell.org/trac/ghc/ticket/7929.
+        #
+        # Since GHC 8.8 the semantics of `-optP` have changed and these flags
+        # are now also forwarded to `cc` via `-Xpreprocessor`, which breaks the
+        # default flags `-E -undef -traditional`. GHC happens to word split the
+        # argument to `-pgmP` which allows to pass these flags to `gcc` itself
+        # as the preprocessor. See
+        # https://gitlab.haskell.org/ghc/ghc/issues/17185#note_261599.
+        "-pgmP",
+        cc + " -E -undef -traditional",
         "-optc-fno-stack-protector",
-        "-optP-E",
-        "-optP-undef",
-        "-optP-traditional",
     ]
+    return args
