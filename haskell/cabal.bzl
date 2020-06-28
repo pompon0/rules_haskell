@@ -592,10 +592,6 @@ def _haskell_cabal_binary_impl(ctx):
     cc_info = cc_common.merge_cc_infos(
         cc_infos = [dep[CcInfo] for dep in ctx.attr.deps if CcInfo in dep],
     )
-    package_id = "{}-{}".format(
-        hs.label.name,
-        ctx.attr.version,
-    )
 
     # Separate direct C library dependencies.
     direct_cc_info = cc_common.merge_cc_infos(
@@ -612,7 +608,7 @@ def _haskell_cabal_binary_impl(ctx):
     cabal = _find_cabal(hs, ctx.files.srcs)
     setup = _find_setup(hs, cabal, ctx.files.srcs)
     package_database = hs.actions.declare_file(
-        "_install/{}.conf.d/package.cache".format(package_id),
+        "_install/{}.conf.d/package.cache".format(hs.label.name),
         sibling = cabal,
     )
     binary = hs.actions.declare_file(
@@ -623,7 +619,7 @@ def _haskell_cabal_binary_impl(ctx):
         sibling = cabal,
     )
     data_dir = hs.actions.declare_directory(
-        "_install/{}_data".format(package_id),
+        "_install/{}_data".format(hs.label.name),
         sibling = cabal,
     )
     (tool_inputs, tool_input_manifests) = ctx.resolve_tools(tools = ctx.attr.tools)
@@ -635,7 +631,7 @@ def _haskell_cabal_binary_impl(ctx):
         cc_info,
         direct_cc_info,
         component = "exe:{}".format(exe_name),
-        package_id = package_id,
+        package_id = hs.label.name,
         tool_inputs = tool_inputs,
         tool_input_manifests = tool_input_manifests,
         cabal = cabal,
@@ -694,10 +690,6 @@ haskell_cabal_binary = rule(
     _haskell_cabal_binary_impl,
     executable = True,
     attrs = {
-        "version": attr.string(
-            doc = "Version of the Cabal package.",
-            mandatory = True,
-        ),
         "exe_name": attr.string(
             doc = "Cabal executable component name. Defaults to the value of the name attribute.",
         ),
@@ -1110,7 +1102,7 @@ def _stack_snapshot_impl(repository_ctx):
         fail("Please specify one of snapshot or local_snapshot")
 
     # Enforce dependency on stack_update
-    repository_ctx.read(repository_ctx.attr.stack_update)
+    # repository_ctx.read(repository_ctx.attr.stack_update)
 
     vendored_packages = _invert(repository_ctx.attr.vendored_packages)
     packages = repository_ctx.attr.packages
@@ -1331,6 +1323,7 @@ _stack_executables = repository_rule(
     },
 )
 
+"""
 def _stack_update_impl(repository_ctx):
     stack_cmd = repository_ctx.path(repository_ctx.attr.stack)
     _execute_or_fail_loudly(repository_ctx, [stack_cmd, "update"])
@@ -1346,6 +1339,7 @@ _stack_update = repository_rule(
     # _stack_snapshot is executed.
     local = True,
 )
+"""
 """Execute stack update.
 
 This is extracted into a singleton repository rule to avoid concurrent
@@ -1585,16 +1579,16 @@ def stack_snapshot(
     # This is to avoid multiple concurrent executions of stack update,
     # which may fail due to ~/.stack/pantry/hackage/hackage-security-lock.
     # See https://github.com/tweag/rules_haskell/issues/1090.
-    maybe(
+    """maybe(
         _stack_update,
         name = "rules_haskell_stack_update",
         stack = stack,
-    )
+    )"""
     _stack_snapshot(
         name = name,
         stack = stack,
         # Dependency for ordered execution, stack update before stack unpack.
-        stack_update = "@rules_haskell_stack_update//:stack_update",
+        # stack_update = "@rules_haskell_stack_update//:stack_update",
         # TODO Remove _from_string_keyed_label_list_dict once following issue
         # is resolved: https://github.com/bazelbuild/bazel/issues/7989.
         extra_deps = _from_string_keyed_label_list_dict(extra_deps),
