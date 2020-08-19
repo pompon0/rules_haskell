@@ -225,6 +225,20 @@ GHC_BINDIST = \
                 "38a3166ea50cccd5bae7e1680eae3aae2b4ae31b61f82a1d8168fb821f43bd67",
             ),
         },
+        "8.10.2": {
+            "darwin_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.2/ghc-8.10.2-x86_64-apple-darwin.tar.xz",
+                "edb772b00c0d7f18bb56ad27765162ee09c508104d40f82128c9114a02f6cfc2",
+            ),
+            "linux_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.2/ghc-8.10.2-x86_64-deb9-linux.tar.xz",
+                "4dbe3b479e76767bfeb4cbb7a4db8b761c4720266193483ca370b2ace3f10f7c",
+            ),
+            "windows_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.2/ghc-8.10.2-x86_64-unknown-mingw32.tar.xz",
+                "dcae4c173b9896e07ff048de5509aa0a4537233150e06e5ce8848303dfadc176",
+            ),
+        },
     }
 
 def _ghc_bindist_impl(ctx):
@@ -304,20 +318,27 @@ haskell_toolchain(
     tools = [":bin"],
     libraries = toolchain_libraries,
     version = "{version}",
-    is_static = {is_static},
+    static_runtime = {static_runtime},
+    fully_static_link = {fully_static_link},
     compiler_flags = {compiler_flags},
     haddock_flags = {haddock_flags},
     repl_ghci_args = {repl_ghci_args},
+    cabalopts = {cabalopts},
     visibility = ["//visibility:public"],
     locale = "{locale}",
 )
     """.format(
         toolchain_libraries = toolchain_libraries,
         version = ctx.attr.version,
-        is_static = os == "windows",
+        static_runtime = os == "windows",
+
+        # At present we don't support fully-statically-linked binaries with GHC
+        # bindists.
+        fully_static_link = False,
         compiler_flags = ctx.attr.compiler_flags,
         haddock_flags = ctx.attr.haddock_flags,
         repl_ghci_args = ctx.attr.repl_ghci_args,
+        cabalopts = ctx.attr.cabalopts,
         locale = locale,
     )
 
@@ -351,6 +372,7 @@ _ghc_bindist = repository_rule(
         "compiler_flags": attr.string_list(),
         "haddock_flags": attr.string_list(),
         "repl_ghci_args": attr.string_list(),
+        "cabalopts": attr.string_list(),
         "patches": attr.label_list(
             default = [],
             doc =
@@ -418,6 +440,7 @@ def ghc_bindist(
         compiler_flags = None,
         haddock_flags = None,
         repl_ghci_args = None,
+        cabalopts = None,
         locale = None):
     """Create a new repository from binary distributions of GHC.
 
@@ -474,6 +497,7 @@ def ghc_bindist(
         compiler_flags = compiler_flags,
         haddock_flags = haddock_flags,
         repl_ghci_args = repl_ghci_args,
+        cabalopts = cabalopts,
         target = target,
         locale = locale,
         **extra_attrs
@@ -490,6 +514,7 @@ def haskell_register_ghc_bindists(
         compiler_flags = None,
         haddock_flags = None,
         repl_ghci_args = None,
+        cabalopts = None,
         locale = None):
     """Register GHC binary distributions for all platforms as toolchains.
 
@@ -513,6 +538,7 @@ def haskell_register_ghc_bindists(
             compiler_flags = compiler_flags,
             haddock_flags = haddock_flags,
             repl_ghci_args = repl_ghci_args,
+            cabalopts = cabalopts,
             locale = locale,
         )
     local_sh_posix_repo_name = "rules_haskell_sh_posix_local"

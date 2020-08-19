@@ -43,6 +43,8 @@ main = hspec $ do
 
       assertSuccess (bazel ["run", "//tests/binary-indirect-cbits:binary-indirect-cbits@repl", "--", "-ignore-dot-ghci", "-e", ":main"])
 
+      assertSuccess (bazel ["run", "//tests/repl-targets:hs-test-bad@repl", "--", "-ignore-dot-ghci", "-e", "1 + 2"])
+
     it "with rebindable syntax" $ do
       let p' (stdout, _stderr) = lines stdout == ["True"]
       outputSatisfy p' (bazel ["run", "//tests/repl-targets:rebindable-syntax@repl", "--", "-ignore-dot-ghci", "-e", "check"])
@@ -50,6 +52,15 @@ main = hspec $ do
     -- Test `compiler_flags` from toolchain and rule for REPL
     it "compiler flags" $ do
       assertSuccess (bazel ["run", "//tests/repl-flags:compiler_flags@repl", "--", "-ignore-dot-ghci", "-e", ":main"])
+
+    -- Test make variable expansion in `compiler_flags` and `repl_ghci_args`.
+    describe "make variables" $ do
+      it "compiler flags" $ do
+        assertSuccess (bazel ["run", "//tests/repl-make-variables:test-compiler-flags@repl", "--", "-ignore-dot-ghci", "-e", ":main"])
+      it "indirect repl flags" $ do
+        assertSuccess (bazel ["run", "//tests/repl-make-variables:repl-indirect-flags", "--", "-ignore-dot-ghci", "-e", ":main"])
+      it "direct repl flags" $ do
+        assertSuccess (bazel ["run", "//tests/repl-make-variables:repl-direct-flags", "--", "-ignore-dot-ghci", "-e", ":main"])
 
     -- Test `repl_ghci_args` from toolchain and rule for REPL
     it "repl flags" $ do

@@ -85,6 +85,7 @@ stack_snapshot(
     ],
     setup_deps = {"polysemy": ["cabal-doctest"]},
     snapshot = test_stack_snapshot,
+    stack_snapshot_json = "//:stackage_snapshot.json",
     tools = [
         # This is not required, as `stack_snapshot` would build alex
         # automatically, however it is used as a test for user provided
@@ -100,6 +101,7 @@ stack_snapshot(
     extra_deps = {"zlib": ["@zlib.dev//:zlib" if is_nix_shell else "@zlib.hs//:zlib"]},
     packages = ["zlib"],
     snapshot = test_stack_snapshot,
+    stack_snapshot_json = "//:stackage-zlib-snapshot.json",
 )
 
 stack_snapshot(
@@ -112,6 +114,7 @@ stack_snapshot(
     haddock = False,
     local_snapshot = "//:ghcide-stack-snapshot.yaml",
     packages = ["ghcide"],
+    stack_snapshot_json = "//:ghcide-snapshot.json",
 )
 
 load(
@@ -163,6 +166,12 @@ test_repl_ghci_args = [
     "-XOverloadedStrings",
 ]
 
+test_cabalopts = [
+    # Used by `tests/cabal-toolchain-flags`
+    "--ghc-option=-DTESTS_TOOLCHAIN_CABALOPTS",
+    "--haddock-option=--optghc=-DTESTS_TOOLCHAIN_CABALOPTS",
+]
+
 load(
     "@rules_haskell//haskell:nixpkgs.bzl",
     "haskell_register_ghc_nixpkgs",
@@ -170,6 +179,7 @@ load(
 
 haskell_register_ghc_nixpkgs(
     attribute_path = "",
+    cabalopts = test_cabalopts,
     compiler_flags = test_compiler_flags,
     haddock_flags = test_haddock_flags,
     locale_archive = "@glibc_locales//:locale-archive",
@@ -185,6 +195,7 @@ load(
 )
 
 haskell_register_ghc_bindists(
+    cabalopts = test_cabalopts,
     compiler_flags = test_compiler_flags,
     version = test_ghc_version,
 )

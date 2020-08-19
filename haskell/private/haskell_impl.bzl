@@ -180,7 +180,7 @@ def _haskell_binary_common_impl(ctx, is_test):
     inspect_coverage = _should_inspect_coverage(ctx, hs, is_test)
 
     dynamic = not ctx.attr.linkstatic
-    if with_profiling or hs.toolchain.is_static:
+    if with_profiling or hs.toolchain.static_runtime:
         # NOTE We can't have profiling and dynamic code at the
         # same time, see:
         # https://ghc.haskell.org/trac/ghc/ticket/15394
@@ -241,6 +241,8 @@ def _haskell_binary_common_impl(ctx, is_test):
         hs_libraries = dep_info.hs_libraries,
         interface_dirs = dep_info.interface_dirs,
         compile_flags = c.compile_flags,
+        user_compile_flags = user_compile_flags,
+        user_repl_flags = _expand_make_variables("repl_ghci_args", ctx, ctx.attr.repl_ghci_args),
     )
     cc_info = cc_common.merge_cc_infos(
         cc_infos = [dep[CcInfo] for dep in ctx.attr.deps if CcInfo in dep],
@@ -360,7 +362,7 @@ def haskell_library_impl(ctx):
     srcs_files, import_dir_map = _prepare_srcs(ctx.attr.srcs)
 
     with_shared = not ctx.attr.linkstatic
-    if with_profiling or hs.toolchain.is_static:
+    if with_profiling or hs.toolchain.static_runtime:
         # NOTE We can't have profiling and dynamic code at the
         # same time, see:
         # https://ghc.haskell.org/trac/ghc/ticket/15394
@@ -469,6 +471,8 @@ def haskell_library_impl(ctx):
         ),
         interface_dirs = depset(transitive = [interface_dirs, export_infos.interface_dirs]),
         compile_flags = c.compile_flags,
+        user_compile_flags = user_compile_flags,
+        user_repl_flags = _expand_make_variables("repl_ghci_args", ctx, ctx.attr.repl_ghci_args),
     )
 
     exports = [
@@ -815,6 +819,8 @@ def haskell_import_impl(ctx):
         hs_libraries = depset(),
         interface_dirs = depset(),
         compile_flags = [],
+        user_compile_flags = [],
+        user_repl_flags = [],
     )
     import_info = HaskellImportHack(
         # Make sure we're using the same order for dynamic_libraries,

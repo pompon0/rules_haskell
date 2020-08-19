@@ -5,6 +5,7 @@ load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_skylib//lib:shell.bzl", "shell")
 load(":cc.bzl", "ghc_cc_program_args")
 load(":private/context.bzl", "haskell_context", "render_env")
+load(":private/expansions.bzl", "expand_make_variables")
 load(
     ":private/path_utils.bzl",
     "ln",
@@ -44,6 +45,7 @@ HaskellReplLoadInfo = provider(
         "cc_info": "CcInfo of transitive C dependencies.",
         "compiler_flags": "Flags to pass to the Haskell compiler.",
         "repl_ghci_args": "Arbitrary extra arguments to pass to GHCi. This extends `compiler_flags` and `repl_ghci_args` from the toolchain",
+        "data_runfiles": "Runtime data dependencies of this target, i.e. the files and runfiles of the `data` attribute.",
     },
 )
 
@@ -58,6 +60,7 @@ HaskellReplDepInfo = provider(
         "interface_dirs": "Set of interface dirs for all the dependencies",
         "cc_libraries_info": "HaskellCcLibrariesInfo of transitive C dependencies.",
         "cc_info": "CcInfo of the package itself (includes its transitive dependencies).",
+        "runfiles": "Runfiles of this target.",
     },
 )
 
@@ -85,6 +88,31 @@ HaskellReplInfo = provider(
     },
 )
 
+def _merge_runfiles(runfiles_list):
+    result = None
+    for runfiles in runfiles_list:
+        if result == None:
+            result = runfiles
+        elif runfiles != None:
+            result = result.merge(runfiles)
+    return result
+
+def _data_runfiles(ctx, rule, attr):
+    """Generate runfiles for a data attribute.
+
+    Attrs:
+      ctx: The rule context.
+      rule: The rule object, `ctx` for a rule, `ctx.rule` for an aspect.
+      attr: The attribute name of the data attribute.
+
+    Returns:
+      A runfiles object capturing data files and data runfiles.
+    """
+    return _merge_runfiles(
+        [ctx.runfiles(files = getattr(rule.files, attr, []))] +
+        [data[DefaultInfo].default_runfiles for data in getattr(rule.attr, attr, [])],
+    )
+
 def _merge_HaskellReplLoadInfo(load_infos):
     source_files = depset()
     import_dirs = depset()
@@ -92,6 +120,7 @@ def _merge_HaskellReplLoadInfo(load_infos):
     cc_infos = []
     compiler_flags = []
     repl_ghci_args = []
+    data_runfiles = []
 
     for load_info in load_infos:
         source_files = depset(transitive = [source_files, load_info.source_files])
@@ -100,6 +129,7 @@ def _merge_HaskellReplLoadInfo(load_infos):
         cc_infos.append(load_info.cc_info)
         compiler_flags += load_info.compiler_flags
         repl_ghci_args += load_info.repl_ghci_args
+        data_runfiles.append(load_info.data_runfiles)
 
     return HaskellReplLoadInfo(
         source_files = source_files,
@@ -108,6 +138,7 @@ def _merge_HaskellReplLoadInfo(load_infos):
         cc_info = cc_common.merge_cc_infos(cc_infos = cc_infos),
         compiler_flags = compiler_flags,
         repl_ghci_args = repl_ghci_args,
+        data_runfiles = _merge_runfiles(data_runfiles),
     )
 
 def _merge_HaskellReplDepInfo(dep_infos):
@@ -116,6 +147,7 @@ def _merge_HaskellReplDepInfo(dep_infos):
     interface_dirs = depset()
     cc_libraries_infos = []
     cc_infos = []
+    runfiles = []
 
     for dep_info in dep_infos:
         package_ids += dep_info.package_ids
@@ -123,6 +155,7 @@ def _merge_HaskellReplDepInfo(dep_infos):
         interface_dirs = depset(transitive = [interface_dirs, dep_info.interface_dirs])
         cc_libraries_infos.append(dep_info.cc_libraries_info)
         cc_infos.append(dep_info.cc_info)
+        runfiles.append(dep_info.runfiles)
 
     return HaskellReplDepInfo(
         package_ids = package_ids,
@@ -130,6 +163,7 @@ def _merge_HaskellReplDepInfo(dep_infos):
         interface_dirs = interface_dirs,
         cc_libraries_info = merge_HaskellCcLibrariesInfo(infos = cc_libraries_infos),
         cc_info = cc_common.merge_cc_infos(cc_infos = cc_infos),
+        runfiles = _merge_runfiles(runfiles),
     )
 
 def _create_HaskellReplCollectInfo(target, ctx):
@@ -153,8 +187,9 @@ def _create_HaskellReplCollectInfo(target, ctx):
                 for dep in getattr(ctx.rule.attr, "deps", [])
                 if CcInfo in dep and not HaskellInfo in dep
             ]),
-            compiler_flags = getattr(ctx.rule.attr, "compiler_flags", []),
-            repl_ghci_args = getattr(ctx.rule.attr, "repl_ghci_args", []),
+            compiler_flags = hs_info.user_compile_flags,
+            repl_ghci_args = hs_info.user_repl_flags,
+            data_runfiles = _data_runfiles(ctx, ctx.rule, "data"),
         )
     if HaskellLibraryInfo in target:
         lib_info = target[HaskellLibraryInfo]
@@ -164,6 +199,7 @@ def _create_HaskellReplCollectInfo(target, ctx):
             interface_dirs = hs_info.interface_dirs,
             cc_libraries_info = target[HaskellCcLibrariesInfo],
             cc_info = target[CcInfo],
+            runfiles = target[DefaultInfo].default_runfiles,
         )
 
     return HaskellReplCollectInfo(
@@ -280,12 +316,14 @@ def _compiler_flags_and_inputs(hs, repl_info, static = False, path_prefix = ""):
         cc_library_files = _concat(get_library_files(hs, cc_libraries_info, cc_libraries))
     else:
         cc_library_files = get_ghci_library_files(hs, cc_libraries_info, cc_libraries)
-    link_libraries(cc_library_files, args)
+
+    link_libraries(cc_library_files, args, path_prefix = path_prefix)
 
     if static:
         all_library_files = _concat(get_library_files(hs, cc_libraries_info, all_libraries, include_real_paths = True))
     else:
         all_library_files = get_ghci_library_files(hs, cc_libraries_info, all_libraries, include_real_paths = True)
+
     inputs = depset(transitive = [
         repl_info.load_info.source_files,
         repl_info.dep_info.package_databases,
@@ -315,7 +353,23 @@ def _create_repl(hs, posix, ctx, repl_info, output):
     # (loads source files and brings in scope the corresponding modules).
     args = ["-hide-all-packages", "-package", "base", "-package", "directory"]
 
-    compiler_flags, inputs = _compiler_flags_and_inputs(hs, repl_info, path_prefix = "$RULES_HASKELL_EXEC_ROOT")
+    # REPL scripts `cd` into the workspace root. Depending on their provenance,
+    # some C libraries' files may be in subdirectories which are _only_ relative
+    # to the execroot. External static C library dependencies are an example of
+    # this -- unchanged we may end up with paths like
+    # `external/some_dependency/lib` and/or
+    # `bazel-out/k8-fastbuild/bin/_solib_k8/...`; the former containing the
+    # archive (`.a`) file we want, but only being relative to the execroot, and
+    # the latter being relative to both the workspace root and the execroot but
+    # only containing dynamic libraries.
+    #
+    # We fix this by prefixing paths with the execroot when generating linker
+    # flags so that all required libraries are visible.
+    compiler_flags, inputs = _compiler_flags_and_inputs(
+        hs,
+        repl_info,
+        path_prefix = "$RULES_HASKELL_EXEC_ROOT",
+    )
     args.extend(compiler_flags)
     args.extend([
         '"{}"'.format(arg)
@@ -359,12 +413,18 @@ def _create_repl(hs, posix, ctx, repl_info, output):
     # negative flag in `repl_ghci_args` can disable a positive flag set
     # in `compiler_flags`, such as `-XNoOverloadedStrings` will disable
     # `-XOverloadedStrings`.
+    repl_ghci_args = expand_make_variables(
+        "repl_ghci_args",
+        ctx,
+        ctx.attr.repl_ghci_args,
+        [ctx.attr.data],
+    )
     quote_args = (
         hs.toolchain.compiler_flags +
         repl_info.load_info.compiler_flags +
         hs.toolchain.repl_ghci_args +
         repl_info.load_info.repl_ghci_args +
-        ctx.attr.repl_ghci_args
+        repl_ghci_args
     )
 
     hs.actions.expand_template(
@@ -383,18 +443,24 @@ def _create_repl(hs, posix, ctx, repl_info, output):
         },
     )
 
-    return [DefaultInfo(
-        executable = output,
-        runfiles = ctx.runfiles(
+    runfiles = [
+        ctx.runfiles(
             files = [
                 hs.tools.ghci,
                 ghci_repl_script,
             ],
             transitive_files = inputs,
-            collect_data = ctx.attr.collect_data,
-        ).merge(
-            hs.toolchain.cc_wrapper.runfiles,
         ),
+        hs.toolchain.cc_wrapper.runfiles,
+    ]
+    if ctx.attr.collect_data:
+        runfiles.append(repl_info.load_info.data_runfiles)
+        runfiles.append(repl_info.dep_info.runfiles)
+        runfiles.append(_data_runfiles(ctx, ctx, "data"))
+
+    return [DefaultInfo(
+        executable = output,
+        runfiles = _merge_runfiles(runfiles),
     )]
 
 def _create_hie_bios(hs, posix, ctx, repl_info):
@@ -420,6 +486,9 @@ def _create_hie_bios(hs, posix, ctx, repl_info):
     # `-i` flags to find source files to modules.
     for import_dir in repl_info.load_info.import_dirs.to_list():
         args.append("-i" + (import_dir if import_dir else "."))
+
+    # List modules (Targets) covered by this cradle.
+    args.extend([f.path for f in repl_info.load_info.source_files.to_list()])
 
     args_file = ctx.actions.declare_file(".%s.hie-bios" % ctx.label.name)
     args_link = ctx.actions.declare_file("%s@hie-bios" % ctx.label.name)
@@ -493,6 +562,10 @@ haskell_repl = rule(
             ],
             doc = "List of Haskell targets to load into the REPL",
         ),
+        "data": attr.label_list(
+            allow_files = True,
+            doc = "See [Bazel documentation](https://docs.bazel.build/versions/master/be/common-definitions.html#common.data). Only available when `collect_data = True`.",
+        ),
         "experimental_from_source": attr.string_list(
             doc = """White-list of targets to load by source.
 
@@ -518,7 +591,7 @@ haskell_repl = rule(
             default = [],
         ),
         "repl_ghci_args": attr.string_list(
-            doc = "Arbitrary extra arguments to pass to GHCi. This extends `compiler_flags` and `repl_ghci_args` from the toolchain",
+            doc = "Arbitrary extra arguments to pass to GHCi. This extends `compiler_flags` and `repl_ghci_args` from the toolchain. Subject to Make variable substitution.",
             default = [],
         ),
         "repl_ghci_commands": attr.string_list(

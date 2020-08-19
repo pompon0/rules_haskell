@@ -16,7 +16,7 @@ workspace in the current working directory with a few dummy build
 targets. See the following sections about customizing the workspace.
 
 Making rules_haskell available
-----------------------------------
+------------------------------
 
 First of all, the ``WORKSPACE`` file must specify how to obtain
 rules_haskell. To use a released version, do the following::
@@ -391,18 +391,47 @@ any given target (or indeed all targets), like in the following:
 Linting your code
 -----------------
 
-The `haskell_lint`_ rule does not build code but runs the GHC
-typechecker on all listed dependencies. Warnings are treated as
-errors.
+There is currently no dedicated rule for linting Haskell code. You can
+apply warning flags using the ``compiler_flags`` attribute, for example ::
 
-Alternatively, you can directly check a target using
+  haskell_library(
+      ...
+      compiler_flags = [
+          "-Werror",
+          "-Wall",
+          "-Wcompat",
+          "-Wincomplete-record-updates",
+          "-Wincomplete-uni-patterns",
+          "-Wredundant-constraints",
+          "-Wnoncanonical-monad-instances",
+      ],
+      ghci_repl_flags = ["-Wwarn"],
+  )
 
-.. code-block:: console
+For larger projects it can make sense to define a custom macro that
+applies such common flags by default. ::
 
-  $ bazel build //my/haskell:target \
-      --aspects @rules_haskell//haskell:defs.bzl%haskell_lint_aspect
+  common_compiler_flags = [ ... ]
 
-.. _haskell_lint: http://api.haskell.build/haskell/lint.html#haskell_lint
+  def my_haskell_library(name, compiler_flags = [], ...):
+      haskell_library(
+          name = name,
+          compiler_flags = common_compiler_flags + compiler_flags,
+          ...
+      )
+
+There is currently no builtin support for invoking ``hlint``. However, you
+can invoke ``hlint`` in a CI step outside of Bazel. Refer to the `hlint
+documentation`_ for further details.
+
+.. _hlint documentation: https://github.com/ndmitchell/hlint#readme
+
+Refer to the `rules_haskell issue tracker`__ for a discussion around
+adding an ``hlint`` rule.
+
+.. _hlint issue: https://github.com/tweag/rules_haskell/issues/1140
+
+__ `hlint issue`_
 
 Using conditional compilation
 -----------------------------
@@ -533,8 +562,179 @@ It is worth noting that Bazel's worker strategy is not sandboxed by default. Thi
 confuse our worker relatively easily. Therefore, it is recommended to supply
 ``--worker_sandboxing`` to ``bazel build`` -- possibly, via your ``.bazelrc.local`` file.
 
+Building fully-statically-linked binaries
+-----------------------------------------
+
+Fully-statically linked binaries have no runtime linkage dependencies and are
+thus typically more portable and easier to package (e.g. in containers) than
+their dynamically-linked counterparts. The trade-off is that
+fully-statically-linked binaries can be larger than dynamically-linked binaries,
+due to the fact that all symbols must be bundled into a single output.
+``rules_haskell`` has support for building fully-statically-linked binaries
+using Nix-provisioned GHC toolchains and the ``static_runtime`` and
+``fully_static_link`` attributes of the ``haskell_register_ghc_nixpkgs`` macro::
+
+  load(
+      "@rules_haskell//haskell:nixpkgs.bzl",
+      "haskell_register_ghc_nixpkgs",
+  )
+
+  haskell_register_ghc_nixpkgs(
+      version = "X.Y.Z",
+      attribute_path = "staticHaskell.ghc",
+      repositories = {"nixpkgs": "@nixpkgs"},
+      static_runtime = True,
+      fully_static_link = True,
+  )
+
+Note that the ``attribute_path`` must refer to a GHC derivation capable of
+building fully-statically-linked binaries. Often this will require you to
+customise a GHC derivation in your Nix package set. If you are unfamiliar with
+Nix, one way to add such a custom package to an existing set is with an
+*overlay*.  Detailed documentation on overlays is available at
+https://nixos.wiki/wiki/Overlays, but for the purposes of this documentation,
+it's enough to know that overlays are essentially functions which accept package
+sets (conventionally called ``super``) and produce new package sets. We can
+write an overlay that modifies the ``ghc`` derivation in its argument to add
+flags that allow it to produce fully-statically-linked binaries as follows::
+
+  let
+    # Pick a version of Nixpkgs that we will base our package set on (apply an
+    # overlay to).
+    baseCommit = "..."; # Pick a Nixpkgs version to pin to.
+    baseSha = "..."; # The SHA of the above version.
+
+    baseNixpkgs = builtins.fetchTarball {
+      name = "nixos-nixpkgs";
+      url = "https://github.com/NixOS/nixpkgs/archive/${baseCommit}.tar.gz";
+      sha256 = baseSha;
+    };
+
+    # Our overlay. We add a `staticHaskell.ghc` path matching that specified in
+    # the haskell_register_ghc_nixpkgs rule above which overrides the `ghc`
+    # derivation provided in the base set (`super.ghc`) with some necessary
+    # arguments.
+    overlay = self: super: {
+      staticHaskell = {
+        ghc = (super.ghc.override {
+          enableRelocatedStaticLibs = true;
+          enableShared = false;
+        }).overrideAttrs (oldAttrs: {
+          preConfigure = ''
+            ${oldAttrs.preConfigure or ""}
+            echo "GhcLibHcOpts += -fPIC -fexternal-dynamic-refs" >> mk/build.mk
+            echo "GhcRtsHcOpts += -fPIC -fexternal-dynamic-refs" >> mk/build.mk
+          '';
+        });
+      };
+    };
+
+  in
+    args@{ overlays ? [], ... }:
+      import baseNixpkgs (args // {
+        overlays = [overlay] ++ overlays;
+      })
+
+In this example we use the ``override`` and ``overrideAttrs`` functions to
+produce a GHC derivation suitable for our needs. Ideally,
+``enableRelocatedStaticLibs`` and ``enableShared`` should be enough, but
+upstream Nixpkgs does not at present reliably pass ``-fexternal-dynamic-refs``
+when ``-fPIC`` is passed, which is required to generate fully-statically-linked
+executables.
+
+You may wish to base your GHC derivation on one which uses Musl, a C library
+designed for static linking (unlike glibc, which can cause issues when linked
+statically). `static-haskell-nix`_ is an example of a project which provides
+such a GHC derivation and can be used like so::
+
+  let
+    baseCommit = "..."; # Pick a Nixpkgs version to pin to.
+    baseSha = "..."; # The SHA of the above version.
+
+    staticHaskellNixCommit = "..."; Pick a static-haskell-nix version to pin to.
+
+    baseNixpkgs = builtins.fetchTarball {
+      name = "nixos-nixpkgs";
+      url = "https://github.com/NixOS/nixpkgs/archive/${baseCommit}.tar.gz";
+      sha256 = baseSha;
+    };
+
+    staticHaskellNixpkgs = builtins.fetchTarball
+      "https://github.com/nh2/static-haskell-nix/archive/${staticHaskellNixCommit}.tar.gz";
+
+    # The `static-haskell-nix` repository contains several entry points for e.g.
+    # setting up a project in which Nix is used solely as the build/package
+    # management tool. We are only interested in the set of packages that underpin
+    # these entry points, which are exposed in the `survey` directory's
+    # `approachPkgs` property.
+    staticHaskellPkgs = (
+      import (staticHaskellNixpkgs + "/survey/default.nix") {}
+    ).approachPkgs;
+
+    overlay = self: super: {
+      staticHaskell = staticHaskellPkgs.extend (selfSH: superSH: {
+        ghc = (superSH.ghc.override {
+          enableRelocatedStaticLibs = true;
+          enableShared = false;
+        }).overrideAttrs (oldAttrs: {
+          preConfigure = ''
+            ${oldAttrs.preConfigure or ""}
+            echo "GhcLibHcOpts += -fPIC -fexternal-dynamic-refs" >> mk/build.mk
+            echo "GhcRtsHcOpts += -fPIC -fexternal-dynamic-refs" >> mk/build.mk
+          '';
+        });
+      });
+    };
+
+  in
+    args@{ overlays ? [], ... }:
+      import baseNixpkgs (args // {
+        overlays = [overlay] ++ overlays;
+      })
+
+If you adopt a Musl-based GHC you should also take care to ensure that the C
+toolchain used by ``rules_haskell`` also uses Musl; you can do this using the
+``nixpkgs_cc_configure`` rule from ``rules_nixpkgs`` and providing a Nix
+expression that supplies appropriate ``cc`` and ``binutils`` derivations::
+
+  nixpkgs_cc_configure(
+      repository = "@nixpkgs",
+
+      # The `staticHaskell` attribute in the previous example exposes the
+      # Musl-backed `cc` and `binutils` derivations already, so it's just a
+      # matter of exposing them to nixpkgs_cc_configure.
+      nix_file_content = """
+        with import <nixpkgs> { config = {}; overlays = []; }; buildEnv {
+          name = "bazel-cc-toolchain";
+          paths = [ staticHaskell.stdenv.cc staticHaskell.binutils ];
+        }
+      """,
+  )
+
+With the toolchain taken care of, you can then create fully-statically-linked
+binaries by enabling the ``fully_static_link`` feature flag, e.g. in ``haskell_binary``::
+
+  haskell_binary(
+      name = ...,
+      srcs = [
+          ...,
+      ],
+      ...,
+      features = [
+          "fully_static_link",
+      ],
+  )
+
+Note, feature flags can be configured `per target`_, `per package`_, or
+globally on the `command line`_.
+
+.. _static-haskell-nix: https://github.com/nh2/static-haskell-nix
+.. _per target: https://docs.bazel.build/versions/master/be/common-definitions.html#common.features
+.. _per package: https://docs.bazel.build/versions/master/be/functions.html#package.features
+.. _command line: https://docs.bazel.build/versions/master/command-line-reference.html#flag--features
+
 Containerization with rules_docker
--------------------------------------
+----------------------------------
 
 Making use of both ``rules_docker`` and ``rules_nixpkgs``, it's possible to containerize
 ``rules_haskell`` ``haskell_binary`` build targets for deployment. In a nutshell, first we must use
@@ -575,10 +775,11 @@ Then we're ready to specify a base image built using the ``rules_nixpkgs`` ``nix
   nixpkgs_package(
       name = "raw-haskell-base-image",
       repository = "//nixpkgs:default.nix",
-      nix_file = "//nixpkgs:haskellBaseImageDocker.nix", # See below for how to define this
+      # See below for how to define this
+      nix_file = "//nixpkgs:haskellBaseImageDocker.nix",
       build_file_content = """
-  package(default_visibility = [ "//visibility:public" ]),
-  exports_file(["image"])
+  package(default_visibility = [ "//visibility:public" ])
+  exports_files(["image"])
       """,
   )
 

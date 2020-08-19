@@ -133,7 +133,7 @@ def _prepare_cabal_inputs(
         setup_deps,
         setup_dep_info,
         srcs,
-        compiler_flags,
+        cabalopts,
         flags,
         generate_haddock,
         cabal_wrapper,
@@ -165,7 +165,7 @@ def _prepare_cabal_inputs(
         dynamic = True,
     )
 
-    # Executables build by Cabal will link Haskell libraries statically, so we
+    # Executables built by Cabal will link Haskell libraries statically, so we
     # only need to include dynamic C libraries in the runfiles tree.
     (_, runfiles_libs) = get_library_files(
         hs,
@@ -212,7 +212,11 @@ def _prepare_cabal_inputs(
         for arg in ["-package-db", "./" + _dirname(package_db)]
     ], join_with = " ", format_each = "--ghc-arg=%s", omit_if_empty = False)
     args.add("--flags=" + " ".join(flags))
-    args.add_all(compiler_flags, format_each = "--ghc-option=%s")
+    if not hs.toolchain.is_darwin and not hs.toolchain.is_windows:
+        # See Note [No PIE when linking] in haskell/private/actions/link.bzl
+        args.add("--ghc-option=-optl-no-pie")
+    args.add_all(hs.toolchain.cabalopts)
+    args.add_all(cabalopts)
     if dynamic_binary:
         args.add_all(
             [
@@ -226,6 +230,37 @@ def _prepare_cabal_inputs(
             ],
             uniquify = True,
         )
+
+    # When building in a static context, we need to make sure that Cabal passes
+    # a couple of options that ensure any static code it builds can be linked
+    # correctly.
+    #
+    # * If we are using a static runtime, we need to ensure GHC generates
+    #   position-independent code (PIC). On Unix we need to pass GHC both
+    #   `-fPIC` and `-fexternal-dynamic-refs`: with `-fPIC` alone, GHC will
+    #   generate `R_X86_64_PC32` relocations on Unix, which prevent loading its
+    #   static libraries as PIC.
+    #
+    # * If we are building fully-statically-linked binaries, we need to ensure that
+    #   we pass arguments to `hsc2hs` such that objects it builds are statically
+    #   linked, otherwise we'll get dynamic linking errors when trying to
+    #   execute those objects to generate code as part of the build.  Since the
+    #   static configuration should ensure that all the objects involved are
+    #   themselves statically built, this is just a case of passing `-static` to
+    #   the linker used by `hsc2hs` (which will be our own wrapper script which
+    #   eventually calls `gcc`, etc.).
+    if hs.toolchain.static_runtime:
+        args.add("--ghc-option=-fPIC")
+
+        if not hs.toolchain.is_windows:
+            args.add("--ghc-option=-fexternal-dynamic-refs")
+
+    if hs.toolchain.fully_static_link:
+        args.add("--hsc2hs-option=--lflag=-static")
+
+    if hs.features.fully_static_link:
+        args.add("--ghc-option=-optl-static")
+
     args.add("--")
     args.add_all(package_databases, map_each = _dirname, format_each = "--package-db=%s")
     args.add_all(direct_include_dirs, format_each = "--extra-include-dirs=%s")
@@ -309,7 +344,13 @@ def _haskell_cabal_library_impl(ctx):
     )
     with_profiling = is_profiling_enabled(hs)
 
-    user_compile_flags = _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
+    user_cabalopts = _expand_make_variables("cabalopts", ctx, ctx.attr.cabalopts)
+    if ctx.attr.compiler_flags:
+        print("WARNING: compiler_flags attribute is deprecated. Use cabalopts instead.")
+        user_cabalopts.extend([
+            "--ghc-option=" + opt
+            for opt in _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
+        ])
     cabal = _find_cabal(hs, ctx.files.srcs)
     setup = _find_setup(hs, cabal, ctx.files.srcs)
     package_database = hs.actions.declare_file(
@@ -349,7 +390,7 @@ def _haskell_cabal_library_impl(ctx):
     else:
         profiling_library = None
         static_library = vanilla_library
-    if hs.toolchain.is_static:
+    if hs.toolchain.static_runtime:
         dynamic_library = None
     else:
         dynamic_library = hs.actions.declare_file(
@@ -379,7 +420,7 @@ def _haskell_cabal_library_impl(ctx):
         setup_deps = setup_deps,
         setup_dep_info = setup_dep_info,
         srcs = ctx.files.srcs,
-        compiler_flags = user_compile_flags,
+        cabalopts = user_cabalopts,
         flags = ctx.attr.flags,
         generate_haddock = ctx.attr.haddock,
         cabal_wrapper = ctx.executable._cabal_wrapper,
@@ -432,6 +473,8 @@ def _haskell_cabal_library_impl(ctx):
         ),
         interface_dirs = depset([interfaces_dir], transitive = [dep_info.interface_dirs]),
         compile_flags = [],
+        user_compile_flags = [],
+        user_repl_flags = [],
     )
     lib_info = HaskellLibraryInfo(package_id = package_id, version = None, exports = [])
     if ctx.attr.haddock:
@@ -509,9 +552,17 @@ haskell_cabal_library = rule(
             aspects = [haskell_cc_libraries_aspect],
             doc = "Dependencies for custom setup Setup.hs.",
         ),
+        "cabalopts": attr.string_list(
+            doc = """Additional flags to pass to `Setup.hs configure`. Subject to make variable expansion.
+
+            Use `--ghc-option=OPT` to configure additional compiler flags.
+            Use `--haddock-option=--optghc=OPT` if these flags are required for haddock generation as well.
+            """,
+        ),
         "compiler_flags": attr.string_list(
-            doc = """Flags to pass to Haskell compiler, in addition to those defined
-            the cabal file. Subject to Make variable substitution.""",
+            doc = """DEPRECATED. Use `cabalopts` with `--ghc-option` instead.
+
+            Flags to pass to Haskell compiler, in addition to those defined the cabal file. Subject to Make variable substitution.""",
         ),
         "tools": attr.label_list(
             cfg = "host",
@@ -604,7 +655,13 @@ def _haskell_cabal_binary_impl(ctx):
     posix = ctx.toolchains["@rules_sh//sh/posix:toolchain_type"]
 
     exe_name = ctx.attr.exe_name if ctx.attr.exe_name else hs.label.name
-    user_compile_flags = _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
+    user_cabalopts = _expand_make_variables("cabalopts", ctx, ctx.attr.cabalopts)
+    if ctx.attr.compiler_flags:
+        print("WARNING: compiler_flags attribute is deprecated. Use cabalopts instead.")
+        user_cabalopts.extend([
+            "--ghc-option=" + opt
+            for opt in _expand_make_variables("compiler_flags", ctx, ctx.attr.compiler_flags)
+        ])
     cabal = _find_cabal(hs, ctx.files.srcs)
     setup = _find_setup(hs, cabal, ctx.files.srcs)
     package_database = hs.actions.declare_file(
@@ -639,7 +696,7 @@ def _haskell_cabal_binary_impl(ctx):
         setup_deps = setup_deps,
         setup_dep_info = setup_dep_info,
         srcs = ctx.files.srcs,
-        compiler_flags = user_compile_flags,
+        cabalopts = user_cabalopts,
         flags = ctx.attr.flags,
         generate_haddock = False,
         cabal_wrapper = ctx.executable._cabal_wrapper,
@@ -673,6 +730,8 @@ def _haskell_cabal_binary_impl(ctx):
         hs_libraries = dep_info.hs_libraries,
         interface_dirs = dep_info.interface_dirs,
         compile_flags = [],
+        user_compile_flags = [],
+        user_repl_flags = [],
     )
     default_info = DefaultInfo(
         files = depset([binary]),
@@ -705,12 +764,21 @@ haskell_cabal_binary = rule(
             aspects = [haskell_cc_libraries_aspect],
             doc = "Dependencies for custom setup Setup.hs.",
         ),
+        "cabalopts": attr.string_list(
+            doc = """Additional flags to pass to `Setup.hs configure`. Subject to make variable expansion.
+
+            Use `--ghc-option=OPT` to configure additional compiler flags.
+            Use `--haddock-option=--optghc=OPT` if these flags are required for haddock generation as well.
+            """,
+        ),
         "compiler_flags": attr.string_list(
-            doc = """Flags to pass to Haskell compiler, in addition to those defined
-            the cabal file. Subject to Make variable substitution.""",
+            doc = """DEPRECATED. Use `cabalopts` with `--ghc-option` instead.
+
+            Flags to pass to Haskell compiler, in addition to those defined the cabal file. Subject to Make variable substitution.""",
         ),
         "tools": attr.label_list(
             cfg = "host",
+            allow_files = True,
             doc = """Tool dependencies. They are built using the host configuration, since
             the tools are executed as part of the build.""",
         ),
@@ -892,58 +960,136 @@ def _get_components(components, package):
     """
     return components.get(package, _default_components.get(package, struct(lib = True, exe = [])))
 
-def _validate_package_specs(package_specs):
-    found_ty = type(package_specs)
-    if found_ty != "list":
-        fail("Unexpected output format for `stack ls dependencies json`. Expected 'list', but got '%s'." % found_ty)
+def _parse_json_field(json, field, ty, errmsg):
+    """Read and type-check a field from a JSON object.
 
-def _validate_package_spec(package_spec):
-    fields = [
-        ("name", "string"),
-        ("version", "string"),
-        ("dependencies", "list"),
-    ]
-    for (field, ty) in fields:
-        if not field in package_spec:
-            fail("Unexpected output format for `stack ls dependencies json`. Missing field '%s'." % field)
-        found_ty = type(package_spec[field])
-        if found_ty != ty:
-            fail("Unexpected output format for `stack ls dependencies json`. Expected field '%s' of type '%s', but got type '%s'." % (field, ty, found_ty))
+    Invokes `fail` on error.
 
-def _compute_dependency_graph(repository_ctx, snapshot, core_packages, versioned_packages, unversioned_packages, vendored_packages, user_components):
-    """Given a list of root packages, compute a dependency graph.
+    Attrs:
+      json: dict, The parsed JSON object.
+      field: string, The name of the field.
+      ty: string, The expected type of the field.
+      errmsg: string, Error message format string. E.g. `Error: {error}`.
 
     Returns:
-      dict(name: struct(name, version, versioned_name, deps, is_core_package, sdist)):
-        name: The unversioned package name.
-        version: The version of the package.
-        versioned_name: <name>-<version>.
-        flags: Cabal flags for this package.
-        deps: The list of library dependencies.
-        tools: The list of build tools.
-        vendored: Label of vendored package, None if not vendored.
-        user_components: Mapping from package names to Cabal components.
-        is_core_package: Whether the package is a core package.
-        sdist: directory name of the unpackaged source distribution or None if core package or vendored.
-
+      The value of the field.
     """
-    all_packages = {}
-    for core_package in core_packages:
-        all_packages[core_package] = struct(
-            name = core_package,
-            components = struct(lib = True, exe = []),
-            version = None,
-            versioned_name = None,
-            flags = repository_ctx.attr.flags.get(core_package, []),
-            deps = [],
-            tools = [],
-            vendored = None,
-            is_core_package = True,
-            sdist = None,
-        )
+    if not field in json:
+        fail(errmsg.format(error = "Missing field '{field}'.".format(field = field)))
+    actual_ty = type(json[field])
+    if actual_ty != ty:
+        fail(errmsg.format(error = "Expected field '{field}' of type '{expected}', but got '{got}'.".format(
+            field = field,
+            expected = ty,
+            got = actual_ty,
+        )))
+    return json[field]
 
-    if not versioned_packages and not unversioned_packages and not vendored_packages:
-        return all_packages
+def _parse_package_spec(package_spec):
+    """Parse a package description from `stack ls dependencies json`.
+
+    The definition of the JSON format can be found in the `stack` sources:
+    https://github.com/commercialhaskell/stack/blob/v2.3.1/src/Stack/Dot.hs#L173-L198
+    """
+    errmsg = "Unexpected output format for `stack ls dependencies json` in {context}: {{error}}"
+
+    # Parse simple fields.
+    parsed = {
+        field: _parse_json_field(
+            package_spec,
+            field,
+            ty,
+            errmsg.format(context = "package description"),
+        )
+        for (field, ty) in [("name", "string"), ("version", "string"), ("dependencies", "list")]
+    }
+
+    # Parse location field.
+    location = {}
+    if parsed["name"] in _CORE_PACKAGES or not "location" in package_spec:
+        location["type"] = "core"
+    else:
+        location_type = _parse_json_field(
+            json = package_spec["location"],
+            field = "type",
+            ty = "string",
+            errmsg = errmsg.format(context = "location description"),
+        )
+        if location_type == "project package":
+            location["type"] = "vendored"
+        elif location_type == "hackage":
+            location["type"] = location_type
+            url_prefix = _parse_json_field(
+                json = package_spec["location"],
+                field = "url",
+                ty = "string",
+                errmsg = errmsg.format(context = location_type + " location description"),
+            )
+            location["url"] = url_prefix + "/{name}-{version}.tar.gz".format(**parsed)
+            # stack does not expose sha-256, see https://github.com/commercialhaskell/stack/issues/5274
+
+        elif location_type == "archive":
+            location["type"] = location_type
+            location["url"] = _parse_json_field(
+                json = package_spec["location"],
+                field = "url",
+                ty = "string",
+                errmsg = errmsg.format(context = location_type + " location description"),
+            )
+            # stack does not yet expose sha-256, see https://github.com/commercialhaskell/stack/pull/5280
+
+        elif location_type in ["git", "hg"]:
+            location["type"] = location_type
+            location["url"] = _parse_json_field(
+                json = package_spec["location"],
+                field = "url",
+                ty = "string",
+                errmsg = errmsg.format(context = location_type + " location description"),
+            )
+            location["commit"] = _parse_json_field(
+                json = package_spec["location"],
+                field = "commit",
+                ty = "string",
+                errmsg = errmsg.format(context = location_type + " location description"),
+            )
+            location["subdir"] = _parse_json_field(
+                json = package_spec["location"],
+                field = "subdir",
+                ty = "string",
+                errmsg = errmsg.format(context = location_type + " location description"),
+            )
+        else:
+            error = "Unexpected location type '{}'.".format(location_type)
+            fail(errmsg.format(context = "location description").format(error = error))
+
+    parsed["location"] = location
+
+    return parsed
+
+def _resolve_packages(
+        repository_ctx,
+        snapshot,
+        core_packages,
+        versioned_packages,
+        unversioned_packages,
+        vendored_packages):
+    """Invoke stack to determine package versions and dependencies.
+
+    Attrs:
+      snapshot: The Stackage snapshot, name or path to custom snapshot.
+      core_packages: Core packages requested by the user.
+      versioned_packages: Versioned packages requested by the user.
+      unversioned_packages: Unversioned packages requested by the user.
+      vendored_packages: Vendored packages provided by the user.
+
+    Returns:
+      dict(name: dict(name, version, dependencies, location)):
+        name: string, The unversioned package name.
+        version: string, The version of the package.
+        dependencies: list, Package dependencies.
+        location: dict(type, url?, sha256?, commit?, subdir?):
+          type: One of "core", "vendored", "hackage", "archive", "git", "hg".
+    """
 
     # Create a dummy package depending on all requested packages.
     resolve_package = "rules-haskell-stack-resolve"
@@ -1000,64 +1146,200 @@ library
         stack + ["ls", "dependencies", "json", "--global-hints", "--external"],
     )
     package_specs = json_parse(exec_result.stdout)
-    _validate_package_specs(package_specs)
 
-    # Collect package metadata
-    remaining_components = dict(**user_components)
+    resolved = {}
     for package_spec in package_specs:
-        _validate_package_spec(package_spec)
-        name = package_spec["name"]
-        if name == resolve_package:
+        parsed_spec = _parse_package_spec(package_spec)
+        if parsed_spec["name"] == resolve_package:
             continue
-        version = package_spec["version"]
-        package = "%s-%s" % (name, version)
-        vendored = vendored_packages.get(name, None)
-        is_core_package = name in _CORE_PACKAGES
-        all_packages[name] = struct(
-            name = name,
-            components = _get_components(remaining_components, name),
-            version = version,
-            versioned_name = package,
-            flags = repository_ctx.attr.flags.get(name, []),
-            deps = [
-                dep
-                for dep in package_spec["dependencies"]
-                if _get_components(remaining_components, dep).lib
-            ],
-            tools = [
-                (dep, exe)
-                for dep in package_spec["dependencies"]
-                for exe in _get_components(remaining_components, dep).exe
-            ],
-            vendored = vendored,
-            is_core_package = is_core_package,
-            sdist = None if is_core_package or vendored != None else package,
-        )
-        remaining_components.pop(name, None)
+        resolved[parsed_spec["name"]] = parsed_spec
 
-        if is_core_package or vendored != None:
-            continue
+    # Sort the items to make sure that generated outputs are deterministic.
+    return {name: resolved[name] for name in sorted(resolved.keys())}
 
-        if version == "<unknown>":
-            fail("""\
-Could not resolve version of {}. It is not in the snapshot.
-Specify a fully qualified package name of the form <package>-<version>.
-            """.format(package))
+def _pin_packages(repository_ctx, resolved):
+    """Pin resolved packages.
 
-    for package in remaining_components.keys():
-        if not package in _default_components:
-            fail("Unknown package: %s" % package, "components")
+    Extends the package specs with reproducibility information. In case of
+    archive dependencies the SHA-256 of the fetched archive. In case of Hackage
+    dependencies, the SHA-256 of the archive as well as the SHA-256 of the
+    Cabal file of the latest Hackage revision.
 
-    # Unpack all remote packages.
+    Cabal file downloads are not reproducible due to Hackage revisions. Here we
+    pin the git revision of all-cabal-hashes that contains the used Cabal files.
+
+    Returns:
+      (all-cabal-hashes, resolved)
+        all-cabal-hashes: URL to the current revision of all-cabal-hashes.
+        resolved: the `resolved` argument, extended with reproducibility information.
+    """
+    errmsg = "Unexpected format in {context}: {{error}}"
+
+    # Determine current git revision of all-cabal-hashes.
+    repository_ctx.download(
+        "https://api.github.com/repos/commercialhaskell/all-cabal-hashes/git/ref/heads/hackage",
+        output = "all-cabal-hashes-hackage.json",
+        executable = False,
+    )
+    hashes_json = json_parse(repository_ctx.read("all-cabal-hashes-hackage.json"))
+    hashes_object = _parse_json_field(
+        json = hashes_json,
+        field = "object",
+        ty = "dict",
+        errmsg = errmsg.format(context = "all-cabal-hashes hackage branch"),
+    )
+    hashes_commit = _parse_json_field(
+        json = hashes_object,
+        field = "sha",
+        ty = "string",
+        errmsg = errmsg.format(context = "all-cabal-hashes hackage branch"),
+    )
+    hashes_url = "https://raw.githubusercontent.com/commercialhaskell/all-cabal-hashes/" + hashes_commit
+
+    resolved = dict(**resolved)
+    for (name, spec) in resolved.items():
+        # Determine package sha256
+        if spec["location"]["type"] == "hackage":
+            # stack does not expose sha256, see https://github.com/commercialhaskell/stack/issues/5274
+            # instead we fetch the sha256 from the all-cabal-hashes repository.
+            json_url = "{url}/{name}/{version}/{name}.json".format(url = hashes_url, **spec)
+            repository_ctx.download(
+                json_url,
+                output = "{name}-{version}.json".format(**spec),
+                executable = False,
+            )
+            json = json_parse(repository_ctx.read("{name}-{version}.json".format(**spec)))
+            hashes = _parse_json_field(
+                json = json,
+                field = "package-hashes",
+                ty = "dict",
+                errmsg = errmsg.format(context = "all-cabal-hashes package description"),
+            )
+
+            # Cabal file downloads are not reproducible due to Hackage revisions.
+            # We pin the git revision of all-cabal-hashes and sha256 of the Cabal file.
+            cabal_url = "{url}/{name}/{version}/{name}.cabal".format(url = hashes_url, **spec)
+            spec["pinned"] = {
+                "url": _parse_json_field(
+                    json = json,
+                    field = "package-locations",
+                    ty = "list",
+                    errmsg = errmsg.format(context = "all-cabal-hashes package description"),
+                ),
+                "sha256": _parse_json_field(
+                    hashes,
+                    "SHA256",
+                    "string",
+                    errmsg = errmsg.format(context = "all-cabal-hashes package hashes"),
+                ),
+                "cabal-sha256": repository_ctx.download(
+                    cabal_url,
+                    output = "{name}-{version}.cabal".format(**spec),
+                    executable = False,
+                ).sha256,
+            }
+        elif spec["location"]["type"] == "archive":
+            # stack does not yet expose sha-256, see https://github.com/commercialhaskell/stack/pull/5280
+            # instead we fetch the archive and let Bazel calculate the sha256.
+            sha256 = repository_ctx.download_and_extract(
+                spec["location"]["url"],
+                output = "{name}-{version}".format(**spec),
+            ).sha256
+
+            # stack also doesn't expose any subdirectories that need to be
+            # stripped. Here we assume the project root to be the root
+            # directory or underneath a top-level directory.
+            root = repository_ctx.path("{name}-{version}".format(**spec))
+            cabal_file = "{name}.cabal".format(**spec)
+            if root.get_child(cabal_file).exists:
+                stripPrefix = ""
+            else:
+                subdirs = [
+                    subdir
+                    for subdir in root.readdir()
+                    if subdir.get_child(cabal_file).exists
+                ]
+                if len(subdirs) != 1:
+                    fail("Unsupported archive format at {url}: Expected {cabal} in the root or underneath a top-level directory".format(
+                        url = spec["location"]["url"],
+                        cabal = cabal_file,
+                    ))
+                stripPrefix = subdirs[0].basename
+
+            spec["pinned"] = {
+                "sha256": sha256,
+                "strip-prefix": stripPrefix,
+            }
+        elif spec["location"]["type"] in ["git", "hg"]:
+            # Bazel cannot cache git (or hg) repositories in the repository
+            # cache as of now. Therefore, we fall back to fetching them using
+            # stack rather than Bazel.
+            # See https://github.com/bazelbuild/bazel/issues/5086
+            pass
+
+    return (hashes_url, resolved)
+
+def _download_packages(repository_ctx, snapshot, pinned):
+    """Downlad all remote packages.
+
+    Downloads hackage and archive packages using Bazel, eligible to repository
+    cache. Downloads git and hg packages using `stack unpack`, not eligible to
+    repository cache.
+    """
+    stack_unpack = {}
+    hashes_url = pinned["all-cabal-hashes"]
+
+    # Unpack hackage and archive packages.
+    for package in pinned["resolved"].values():
+        if package["location"]["type"] == "hackage":
+            repository_ctx.download_and_extract(
+                package["pinned"]["url"],
+                output = "{name}-{version}".format(**package),
+                sha256 = package["pinned"]["sha256"],
+                stripPrefix = "{name}-{version}".format(**package),
+            )
+
+            # Overwrite the Cabal file with the pinned revision.
+            repository_ctx.download(
+                "{url}/{name}/{version}/{name}.cabal".format(url = hashes_url, **package),
+                output = "{name}-{version}/{name}.cabal".format(**package),
+                sha256 = package["pinned"]["cabal-sha256"],
+                executable = False,
+            )
+        elif package["location"]["type"] == "archive":
+            repository_ctx.download_and_extract(
+                package["location"]["url"],
+                output = "{name}-{version}".format(**package),
+                sha256 = package["pinned"]["sha256"],
+                stripPrefix = package["pinned"]["strip-prefix"],
+            )
+        elif package["location"]["type"] in ["git", "hg"]:
+            # Unpack remote packages.
+            #
+            # Bazel cannot cache git (or hg) repositories in the repository
+            # cache as of now. Therefore, we fall back to fetching them using
+            # stack rather than Bazel.
+            # See https://github.com/bazelbuild/bazel/issues/5086
+            #
+            # TODO: Implement this using Bazel to avoid `stack update`.
+            stack_unpack[package["name"]] = package
+
+    if stack_unpack:
+        # Enforce dependency on stack_update.
+        # Hard-coded label since `stack_update` is `None` in this case.
+        # repository_ctx.read(Label("@rules_haskell_stack_update//:stack_update"))
+        _download_packages_unpinned(repository_ctx, snapshot, stack_unpack)
+
+def _download_packages_unpinned(repository_ctx, snapshot, resolved):
+    """Download remote packages using `stack unpack`."""
     remote_packages = [
-        package.name
-        for package in all_packages.values()
-        if package.sdist != None
+        package["name"]
+        for package in resolved.values()
+        if package["location"]["type"] not in ["core", "vendored"]
     ]
+    stack = [repository_ctx.path(repository_ctx.attr.stack)]
     if remote_packages:
         _execute_or_fail_loudly(repository_ctx, stack + ["--resolver", snapshot, "unpack"] + remote_packages)
-
-    return all_packages
 
 def _invert(d):
     """Invert a dictionary."""
@@ -1091,29 +1373,45 @@ def _to_string_keyed_label_list_dict(d):
 def _label_to_string(label):
     return "@{}//{}:{}".format(label.workspace_name, label.package, label.name)
 
-def _stack_snapshot_impl(repository_ctx):
-    if repository_ctx.attr.snapshot and repository_ctx.attr.local_snapshot:
+def _parse_stack_snapshot(repository_ctx, snapshot, local_snapshot):
+    if snapshot and local_snapshot:
         fail("Please specify either snapshot or local_snapshot, but not both.")
-    elif repository_ctx.attr.snapshot:
-        snapshot = repository_ctx.attr.snapshot
-    elif repository_ctx.attr.local_snapshot:
-        snapshot = repository_ctx.path(repository_ctx.attr.local_snapshot)
+    elif snapshot:
+        snapshot = snapshot
+    elif local_snapshot:
+        snapshot = repository_ctx.path(local_snapshot)
     else:
         fail("Please specify one of snapshot or local_snapshot")
+    return snapshot
 
-    # Enforce dependency on stack_update
-    # repository_ctx.read(repository_ctx.attr.stack_update)
+def _parse_packages_list(packages, vendored_packages):
+    """Parse the `packages` attribute to `stack_snapshot`.
 
-    vendored_packages = _invert(repository_ctx.attr.vendored_packages)
-    packages = repository_ctx.attr.packages
+    Validates that there are no duplicates between `packages` and
+    `vendored_packages`.
+
+    Args:
+      packages: The list of requested packages versioned or unversioned.
+      vendored_packages: The dict of provided vendored packages.
+
+    Returns:
+      struct(all, core, versioned, unversioned):
+        all: The unversioned names of all requested packages.
+        core: The unversioned names of requested core packages.
+        versioned: The versioned names of requested versioned packages.
+        unversioned: The unversioned names of requested unversioned packages.
+    """
+    all_packages = []
     core_packages = []
     versioned_packages = []
     unversioned_packages = []
+
     for package in packages:
         has_version = _has_version(package)
         unversioned = _chop_version(package) if has_version else package
         if unversioned in vendored_packages:
             fail("Duplicate package '{}'. Packages may not be listed in both 'packages' and 'vendored_packages'.".format(package))
+        all_packages.append(unversioned)
         if unversioned in _CORE_PACKAGES:
             if has_version:
                 fail("{} is a core package, built into GHC. Its version is determined entirely by the version of GHC you are using. You cannot pin it to {}.".format(unversioned, _version(package)))
@@ -1122,19 +1420,311 @@ def _stack_snapshot_impl(repository_ctx):
             versioned_packages.append(package)
         else:
             unversioned_packages.append(package)
+
+    return struct(
+        all = all_packages,
+        core = core_packages,
+        versioned = versioned_packages,
+        unversioned = unversioned_packages,
+    )
+
+def _pretty_print_kvs(level, kvs):
+    """Write a dict in a human and diff friendly format."""
+    return "{{\n{lines}\n{indent}}}".format(
+        indent = level * 2 * " ",
+        lines = ",\n".join([
+            '{indent}"{key}": {value}'.format(
+                indent = (level + 1) * 2 * " ",
+                key = k,
+                value = v,
+            )
+            for (k, v) in kvs.items()
+        ]),
+    )
+
+def _snapshot_json_checksum(all_cabal_hashes, resolved):
+    return hash(repr({
+        "all-cabal-hashes": all_cabal_hashes,
+        "resolved": resolved,
+    }))
+
+def _write_snapshot_json(repository_ctx, all_cabal_hashes, resolved):
+    """Write a snapshot.json file into the remote repository root.
+
+    Includes a checksum of the stored data used for validation on loading.
+    """
+    checksum = _snapshot_json_checksum(all_cabal_hashes, resolved)
+    repository_ctx.file(
+        "snapshot.json",
+        executable = False,
+        # Write one package per line sorted by name to be reproducible and diff
+        # friendly. The order is ensured when constructing the dictionary and
+        # preserved by the `items` iterator.
+        content = _pretty_print_kvs(0, {
+            "__GENERATED_FILE_DO_NOT_MODIFY_MANUALLY": checksum,
+            "all-cabal-hashes": repr(all_cabal_hashes),
+            "resolved": _pretty_print_kvs(1, {
+                name: struct(**spec).to_json()
+                for (name, spec) in resolved.items()
+            }),
+        }),
+    )
+
+def _read_snapshot_json(repository_ctx, filename):
+    """Load a snapshot.json file.
+
+    Validates the required fields and checks the stored checksum to detect file
+    corruption or manual modification.
+    """
+    errmsg = """\
+Failed to read {filename}: {{error}}
+
+The file is generated and should not be modified manually, it may be corrupted.
+Try to regenerate it by running the following command:
+
+  bazel run @{workspace}-unpinned//:pin
+
+""".format(filename = filename, workspace = repository_ctx.name)
+
+    # Parse JSON
+    pinned = json_parse(
+        repository_ctx.read(repository_ctx.attr.stack_snapshot_json),
+        fail_on_invalid = False,
+    )
+    if pinned == None:
+        fail(errmsg.format(error = "Failed to parse JSON."))
+
+    # Read snapshot.json data and validate required fields.
+    expected_checksum = _parse_json_field(
+        json = pinned,
+        field = "__GENERATED_FILE_DO_NOT_MODIFY_MANUALLY",
+        ty = "int",
+        errmsg = errmsg,
+    )
+    all_cabal_hashes = _parse_json_field(
+        json = pinned,
+        field = "all-cabal-hashes",
+        ty = "string",
+        errmsg = errmsg,
+    )
+    raw_resolved = _parse_json_field(
+        json = pinned,
+        field = "resolved",
+        ty = "dict",
+        errmsg = errmsg,
+    )
+    resolved = {}
+    for name in sorted(raw_resolved.keys()):
+        raw_spec = raw_resolved[name]
+        spec = {
+            field: _parse_json_field(raw_spec, field, ty, errmsg)
+            for (field, ty) in [("name", "string"), ("version", "string"), ("dependencies", "list")]
+        }
+
+        raw_location = _parse_json_field(
+            json = raw_spec,
+            field = "location",
+            ty = "dict",
+            errmsg = errmsg,
+        )
+        location_type = _parse_json_field(
+            json = raw_location,
+            field = "type",
+            ty = "string",
+            errmsg = errmsg,
+        )
+        if location_type in ["core", "vendored"]:
+            spec["location"] = {"type": location_type}
+        elif location_type in ["hackage", "archive"]:
+            spec["location"] = {
+                "type": location_type,
+                "url": _parse_json_field(
+                    json = raw_location,
+                    field = "url",
+                    ty = "string",
+                    errmsg = errmsg,
+                ),
+            }
+        elif location_type in ["git", "hg"]:
+            spec["location"] = {
+                "type": location_type,
+                "url": _parse_json_field(
+                    json = raw_location,
+                    field = "url",
+                    ty = "string",
+                    errmsg = errmsg,
+                ),
+                "commit": _parse_json_field(
+                    json = raw_location,
+                    field = "commit",
+                    ty = "string",
+                    errmsg = errmsg,
+                ),
+                "subdir": _parse_json_field(
+                    json = raw_location,
+                    field = "subdir",
+                    ty = "string",
+                    errmsg = errmsg,
+                ),
+            }
+        else:
+            fail(errmsg.format(error = "Unknown location type '{}'.".format(location_type)))
+
+        if location_type == "hackage":
+            raw_pinned = _parse_json_field(
+                json = raw_spec,
+                field = "pinned",
+                ty = "dict",
+                errmsg = errmsg,
+            )
+            spec["pinned"] = {
+                field: _parse_json_field(raw_pinned, field, ty, errmsg)
+                for (field, ty) in [("url", "list"), ("sha256", "string"), ("cabal-sha256", "string")]
+            }
+        elif location_type == "archive":
+            raw_pinned = _parse_json_field(
+                json = raw_spec,
+                field = "pinned",
+                ty = "dict",
+                errmsg = errmsg,
+            )
+            spec["pinned"] = {
+                "sha256": _parse_json_field(
+                    json = raw_pinned,
+                    field = "sha256",
+                    ty = "string",
+                    errmsg = errmsg,
+                ),
+                "strip-prefix": _parse_json_field(
+                    json = raw_pinned,
+                    field = "strip-prefix",
+                    ty = "string",
+                    errmsg = errmsg,
+                ),
+            }
+
+        resolved[name] = spec
+
+    # Check the stored checksum.
+    actual_checksum = _snapshot_json_checksum(
+        all_cabal_hashes,
+        resolved,
+    )
+    if actual_checksum != expected_checksum:
+        fail(errmsg.format(
+            error = "Mismatching checksum, expected {expected}, got {actual}.".format(
+                expected = expected_checksum,
+                actual = actual_checksum,
+            ),
+        ))
+
+    return pinned
+
+def _stack_snapshot_unpinned_impl(repository_ctx):
+    snapshot = _parse_stack_snapshot(
+        repository_ctx,
+        repository_ctx.attr.snapshot,
+        repository_ctx.attr.local_snapshot,
+    )
+
+    vendored_packages = _invert(repository_ctx.attr.vendored_packages)
+    packages = _parse_packages_list(
+        repository_ctx.attr.packages,
+        vendored_packages,
+    )
+
+    # Enforce dependency on stack_update
+    # repository_ctx.read(repository_ctx.attr.stack_update)
+
+    resolved = _resolve_packages(
+        repository_ctx,
+        snapshot,
+        packages.core,
+        packages.versioned,
+        packages.unversioned,
+        vendored_packages,
+    )
+    (all_cabal_hashes, resolved) = _pin_packages(repository_ctx, resolved)
+
+    _write_snapshot_json(repository_ctx, all_cabal_hashes, resolved)
+
+    repository_name = repository_ctx.name[:-len("-unpinned")]
+
+    if repository_ctx.attr.stack_snapshot_json:
+        stack_snapshot_location = paths.join(
+            repository_ctx.attr.stack_snapshot_json.package,
+            repository_ctx.attr.stack_snapshot_json.name,
+        )
+    else:
+        stack_snapshot_location = "%s_snapshot.json" % repository_name
+
+    repository_ctx.template(
+        "pin.sh",
+        repository_ctx.path(Label("@rules_haskell//haskell:private/stack_snapshot_pin.sh.tpl")),
+        executable = True,
+        substitutions = {
+            "{repository_name}": repository_name,
+            "{stack_snapshot_source}": "snapshot.json",
+            "{stack_snapshot_location}": stack_snapshot_location,
+            "{predefined_stack_snapshot}": str(repository_ctx.attr.stack_snapshot_json != None),
+        },
+    )
+
+    repository_ctx.file(
+        "BUILD.bazel",
+        executable = False,
+        content = """\
+sh_binary(
+    name = "pin",
+    data = ["snapshot.json"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+    srcs = ["pin.sh"],
+)
+""",
+    )
+
+def _stack_snapshot_impl(repository_ctx):
+    snapshot = _parse_stack_snapshot(
+        repository_ctx,
+        repository_ctx.attr.snapshot,
+        repository_ctx.attr.local_snapshot,
+    )
+
+    vendored_packages = _invert(repository_ctx.attr.vendored_packages)
+    packages = _parse_packages_list(
+        repository_ctx.attr.packages,
+        vendored_packages,
+    )
+
+    # Resolve and fetch packages
+    if repository_ctx.attr.stack_snapshot_json == None:
+        # Enforce dependency on stack_update
+        # repository_ctx.read(repository_ctx.attr.stack_update)
+        resolved = _resolve_packages(
+            repository_ctx,
+            snapshot,
+            packages.core,
+            packages.versioned,
+            packages.unversioned,
+            vendored_packages,
+        )
+        _download_packages_unpinned(repository_ctx, snapshot, resolved)
+    else:
+        pinned = _read_snapshot_json(repository_ctx, repository_ctx.attr.stack_snapshot_json)
+        _download_packages(repository_ctx, snapshot, pinned)
+        resolved = pinned["resolved"]
+
     user_components = {
         name: _parse_components(name, components)
         for (name, components) in repository_ctx.attr.components.items()
     }
-    all_packages = _compute_dependency_graph(
-        repository_ctx,
-        snapshot,
-        core_packages,
-        versioned_packages,
-        unversioned_packages,
-        vendored_packages,
-        user_components,
-    )
+    all_components = {}
+    for (name, spec) in resolved.items():
+        all_components[name] = _get_components(user_components, name)
+        user_components.pop(name, None)
+    for package in user_components.keys():
+        if not package in _default_components:
+            fail("Unknown package: %s" % package, "components")
 
     extra_deps = _to_string_keyed_label_list_dict(repository_ctx.attr.extra_deps)
     tools = [_label_to_string(label) for label in repository_ctx.attr.tools]
@@ -1142,18 +1732,30 @@ def _stack_snapshot_impl(repository_ctx):
     # Write out dependency graph as importable Starlark value.
     repository_ctx.file(
         "packages.bzl",
-        "packages = " + repr({
-            package.name: struct(
-                name = package.name,
-                version = package.version,
-                library = package.components.lib,
-                executables = package.components.exe,
-                deps = [Label("@{}//:{}".format(repository_ctx.name, dep)) for dep in package.deps],
-                tools = [Label("@{}-exe//{}:{}".format(repository_ctx.name, dep, exe)) for (dep, exe) in package.tools],
-                flags = package.flags,
-            )
-            for package in all_packages.values()
-        }),
+        """\
+packages = {
+    %s
+}
+""" % ",\n    ".join([
+            '"%s": ' % name + repr(struct(
+                name = name,
+                version = spec["version"],
+                library = all_components[name].lib,
+                executables = all_components[name].exe,
+                deps = [
+                    Label("@{}//:{}".format(repository_ctx.name, dep))
+                    for dep in spec["dependencies"]
+                    if all_components[dep].lib
+                ],
+                tools = [
+                    Label("@{}-exe//{}:{}".format(repository_ctx.name, dep, exe))
+                    for dep in spec["dependencies"]
+                    for exe in all_components[dep].exe
+                ],
+                flags = repository_ctx.attr.flags.get(name, []),
+            ))
+            for (name, spec) in resolved.items()
+        ]),
         executable = False,
     )
 
@@ -1163,24 +1765,26 @@ def _stack_snapshot_impl(repository_ctx):
 load("@rules_haskell//haskell:cabal.bzl", "haskell_cabal_binary", "haskell_cabal_library")
 load("@rules_haskell//haskell:defs.bzl", "haskell_library", "haskell_toolchain_library")
 """)
-    for package in all_packages.values():
-        if package.name in packages or package.versioned_name in packages or package.vendored != None:
+    for (name, spec) in resolved.items():
+        version = spec["version"]
+        package = "%s-%s" % (name, version)
+        if name in packages.all or name in vendored_packages:
             visibility = ["//visibility:public"]
         else:
             visibility = ["//visibility:private"]
-        if package.vendored != None:
+        if name in vendored_packages:
             build_file_builder.append(
                 """
 alias(name = "{name}", actual = "{actual}", visibility = {visibility})
-""".format(name = package.name, actual = package.vendored, visibility = visibility),
+""".format(name = name, actual = vendored_packages[name], visibility = visibility),
             )
-        elif package.is_core_package:
+        elif name in _CORE_PACKAGES:
             build_file_builder.append(
                 """
 haskell_toolchain_library(name = "{name}", visibility = {visibility})
-""".format(name = package.name, visibility = visibility),
+""".format(name = name, visibility = visibility),
             )
-        elif package.name in _EMPTY_PACKAGES_BLACKLIST:
+        elif name in _EMPTY_PACKAGES_BLACKLIST:
             build_file_builder.append(
                 """
 haskell_library(
@@ -1189,25 +1793,30 @@ haskell_library(
     visibility = {visibility},
 )
 """.format(
-                    name = package.name,
-                    version = package.version,
+                    name = name,
+                    version = version,
                     visibility = visibility,
                 ),
             )
         else:
-            library_deps = package.deps + [
+            library_deps = [
+                dep
+                for dep in spec["dependencies"]
+                if all_components[dep].lib
+            ] + [
                 _label_to_string(label)
-                for label in extra_deps.get(package.name, [])
+                for label in extra_deps.get(name, [])
             ]
             library_tools = [
                 "_%s_exe_%s" % (dep, exe)
-                for (dep, exe) in package.tools
+                for dep in spec["dependencies"]
+                for exe in all_components[dep].exe
             ] + tools
             setup_deps = [
-                _label_to_string(Label("@{}//:{}".format(repository_ctx.name, package.name)).relative(label))
-                for label in repository_ctx.attr.setup_deps.get(package.name, [])
+                _label_to_string(Label("@{}//:{}".format(repository_ctx.name, name)).relative(label))
+                for label in repository_ctx.attr.setup_deps.get(name, [])
             ]
-            if package.components.lib:
+            if all_components[name].lib:
                 build_file_builder.append(
                     """
 haskell_cabal_library(
@@ -1220,16 +1829,16 @@ haskell_cabal_library(
     setup_deps = {setup_deps},
     tools = {tools},
     visibility = {visibility},
-    compiler_flags = ["-w", "-optF=-w"],
+    cabalopts = ["--ghc-option=-w", "--ghc-option=-optF=-w"],
     verbose = {verbose},
     unique_name = True,
 )
 """.format(
-                        name = package.name,
-                        version = package.version,
+                        name = name,
+                        version = version,
                         haddock = repr(repository_ctx.attr.haddock),
-                        flags = package.flags,
-                        dir = package.sdist,
+                        flags = repository_ctx.attr.flags.get(name, []),
+                        dir = package,
                         deps = library_deps,
                         setup_deps = setup_deps,
                         tools = library_tools,
@@ -1237,15 +1846,14 @@ haskell_cabal_library(
                         verbose = repr(repository_ctx.attr.verbose),
                     ),
                 )
-                if package.versioned_name != None:
-                    build_file_builder.append(
-                        """alias(name = "{name}", actual = ":{actual}", visibility = {visibility})""".format(
-                            name = package.versioned_name,
-                            actual = package.name,
-                            visibility = visibility,
-                        ),
-                    )
-            for exe in package.components.exe:
+                build_file_builder.append(
+                    """alias(name = "{name}", actual = ":{actual}", visibility = {visibility})""".format(
+                        name = package,
+                        actual = name,
+                        visibility = visibility,
+                    ),
+                )
+            for exe in all_components[name].exe:
                 build_file_builder.append(
                     """
 haskell_cabal_binary(
@@ -1256,16 +1864,16 @@ haskell_cabal_binary(
     deps = {deps},
     tools = {tools},
     visibility = ["@{workspace}-exe//{name}:__pkg__"],
-    compiler_flags = ["-w", "-optF=-w"],
+    cabalopts = ["--ghc-option=-w", "--ghc-option=-optF=-w"],
     verbose = {verbose},
 )
 """.format(
                         workspace = repository_ctx.name,
-                        name = package.name,
+                        name = name,
                         exe = exe,
-                        flags = package.flags,
-                        dir = package.sdist,
-                        deps = library_deps + ([package.name] if package.components.lib else []),
+                        flags = repository_ctx.attr.flags.get(name, []),
+                        dir = package,
+                        deps = library_deps + ([name] if all_components[name].lib else []),
                         setup_deps = setup_deps,
                         tools = library_tools,
                         visibility = visibility,
@@ -1275,9 +1883,24 @@ haskell_cabal_binary(
     build_file_content = "\n".join(build_file_builder)
     repository_ctx.file("BUILD.bazel", build_file_content, executable = False)
 
+_stack_snapshot_unpinned = repository_rule(
+    _stack_snapshot_unpinned_impl,
+    attrs = {
+        "stack_snapshot_json": attr.label(allow_single_file = True),
+        "snapshot": attr.string(),
+        "local_snapshot": attr.label(allow_single_file = True),
+        "packages": attr.string_list(),
+        "vendored_packages": attr.label_keyed_string_dict(),
+        "flags": attr.string_list_dict(),
+        "stack": attr.label(),
+        # "stack_update": attr.label(),
+    },
+)
+
 _stack_snapshot = repository_rule(
     _stack_snapshot_impl,
     attrs = {
+        "stack_snapshot_json": attr.label(allow_single_file = True),
         "snapshot": attr.string(),
         "local_snapshot": attr.label(allow_single_file = True),
         "packages": attr.string_list(),
@@ -1289,7 +1912,7 @@ _stack_snapshot = repository_rule(
         "tools": attr.label_list(),
         "components": attr.string_list_dict(),
         "stack": attr.label(),
-        "stack_update": attr.label(),
+        # "stack_update": attr.label(),
         "verbose": attr.bool(default = False),
     },
 )
@@ -1426,13 +2049,14 @@ def stack_snapshot(
         vendored_packages = {},
         snapshot = "",
         local_snapshot = None,
+        stack_snapshot_json = None,
         packages = [],
         flags = {},
         haddock = True,
         setup_deps = {},
         tools = [],
         components = {},
-        stack_update = None,
+        # stack_update = None,
         verbose = False,
         **kwargs):
     """Use Stack to download and extract Cabal source distributions.
@@ -1451,6 +2075,26 @@ def stack_snapshot(
     to be specified with a package identifier of the form
     `<package>-<version>` in the `packages` attribute. Note that you cannot
     override the version of any [packages built into GHC][ghc-builtins].
+
+    This rule invokes the `stack` tool for version and dependency resolution
+    based on the specified snapshot. You can generate a `stack_snapshot.json`
+    file to avoid invoking `stack` on every fetch and instead pin the outcome
+    in a file that can be checked into revision control. Execute the following
+    command:
+
+    ```
+    bazel run @stackage-unpinned//:pin
+    ```
+
+    Then specify the `stack_snapshot_json` attribute to point to the generated
+    file:
+
+    ```
+    stack_snapshot(
+        ...
+        stack_snapshot_json = "//:stackage_snapshot.json",
+    )
+    ```
 
     By default `stack_snapshot` defines a library target for each package. If a
     package does not contain a library component or contains executable
@@ -1535,6 +2179,8 @@ def stack_snapshot(
       snapshot: The name of a Stackage snapshot. Incompatible with local_snapshot.
       local_snapshot: A custom Stack snapshot file, as per the Stack documentation.
         Incompatible with snapshot.
+      stack_snapshot_json: A label to a `stack_snapshot.json` file, e.g. `//:stack_snapshot.json`.
+        Specify this to use pinned artifacts for generating build targets.
       packages: A set of package identifiers. For packages in the snapshot,
         version numbers can be omitted.
       vendored_packages: Add or override a package to the snapshot with a custom
@@ -1584,11 +2230,23 @@ def stack_snapshot(
         name = "rules_haskell_stack_update",
         stack = stack,
     )"""
+    _stack_snapshot_unpinned(
+        name = name + "-unpinned",
+        stack = stack,
+        # Dependency for ordered execution, stack update before stack unpack.
+        # stack_update = "@rules_haskell_stack_update//:stack_update",
+        vendored_packages = _invert(vendored_packages),
+        snapshot = snapshot,
+        local_snapshot = local_snapshot,
+        stack_snapshot_json = stack_snapshot_json,
+        packages = packages,
+        flags = flags,
+    )
     _stack_snapshot(
         name = name,
         stack = stack,
         # Dependency for ordered execution, stack update before stack unpack.
-        # stack_update = "@rules_haskell_stack_update//:stack_update",
+        # stack_update = None if stack_snapshot_json else "@rules_haskell_stack_update//:stack_update",
         # TODO Remove _from_string_keyed_label_list_dict once following issue
         # is resolved: https://github.com/bazelbuild/bazel/issues/7989.
         extra_deps = _from_string_keyed_label_list_dict(extra_deps),
@@ -1597,6 +2255,7 @@ def stack_snapshot(
         vendored_packages = _invert(vendored_packages),
         snapshot = snapshot,
         local_snapshot = local_snapshot,
+        stack_snapshot_json = stack_snapshot_json,
         packages = packages,
         flags = flags,
         haddock = haddock,
