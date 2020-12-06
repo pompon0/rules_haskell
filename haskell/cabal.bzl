@@ -4,6 +4,7 @@ load("@bazel_skylib//lib:dicts.bzl", "dicts")
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 load("//vendor/bazel_json/lib:json_parser.bzl", "json_parse")
+load("@bazel_tools//tools/cpp:lib_cc_configure.bzl", "get_cpu_value")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load(":cc.bzl", "cc_interop_info")
 load(":private/actions/info.bzl", "library_info_output_groups")
@@ -140,7 +141,8 @@ def _prepare_cabal_inputs(
         package_database,
         verbose,
         transitive_haddocks,
-        dynamic_binary = None):
+        is_library = False,
+        dynamic_file = None):
     """Compute Cabal wrapper, arguments, inputs."""
     with_profiling = is_profiling_enabled(hs)
 
@@ -212,16 +214,19 @@ def _prepare_cabal_inputs(
         for arg in ["-package-db", "./" + _dirname(package_db)]
     ], join_with = " ", format_each = "--ghc-arg=%s", omit_if_empty = False)
     args.add("--flags=" + " ".join(flags))
-    if not hs.toolchain.is_darwin and not hs.toolchain.is_windows:
+    if dynamic_file:
         # See Note [No PIE when linking] in haskell/private/actions/link.bzl
-        args.add("--ghc-option=-optl-no-pie")
+        if not (hs.toolchain.is_darwin or hs.toolchain.is_windows):
+            version = [int(x) for x in hs.toolchain.version.split(".")]
+            if version < [8, 10] or not is_library:
+                args.add("--ghc-option=-optl-no-pie")
     args.add_all(hs.toolchain.cabalopts)
     args.add_all(cabalopts)
-    if dynamic_binary:
+    if dynamic_file:
         args.add_all(
             [
                 "--ghc-option=-optl-Wl,-rpath," + create_rpath_entry(
-                    binary = dynamic_binary,
+                    binary = dynamic_file,
                     dependency = lib,
                     keep_filename = False,
                     prefix = relative_rpath_prefix(hs.toolchain.is_darwin),
@@ -426,7 +431,8 @@ def _haskell_cabal_library_impl(ctx):
         cabal_wrapper = ctx.executable._cabal_wrapper,
         package_database = package_database,
         verbose = ctx.attr.verbose,
-        dynamic_binary = dynamic_library,
+        is_library = True,
+        dynamic_file = dynamic_library,
         transitive_haddocks = _gather_transitive_haddocks(ctx.attr.deps),
     )
     outputs = [
@@ -493,18 +499,23 @@ def _haskell_cabal_library_impl(ctx):
         requested_features = ctx.features,
         unsupported_features = ctx.disabled_features,
     )
-    library_to_link = cc_common.create_library_to_link(
-        actions = ctx.actions,
-        feature_configuration = feature_configuration,
-        dynamic_library = dynamic_library,
-        dynamic_library_symlink_path =
-            _shorten_library_symlink(dynamic_library) if dynamic_library and ctx.attr.unique_name else "",
-        static_library = static_library,
-        cc_toolchain = cc_toolchain,
+    linker_input = cc_common.create_linker_input(
+        owner = ctx.label,
+        libraries = depset(direct = [
+            cc_common.create_library_to_link(
+                actions = ctx.actions,
+                feature_configuration = feature_configuration,
+                dynamic_library = dynamic_library,
+                dynamic_library_symlink_path =
+                    _shorten_library_symlink(dynamic_library) if dynamic_library and ctx.attr.unique_name else "",
+                static_library = static_library,
+                cc_toolchain = cc_toolchain,
+            ),
+        ]),
     )
     compilation_context = cc_common.create_compilation_context()
     linking_context = cc_common.create_linking_context(
-        libraries_to_link = [library_to_link],
+        linker_inputs = depset(direct = [linker_input]),
     )
     cc_info = cc_common.merge_cc_infos(
         cc_infos = [
@@ -702,7 +713,7 @@ def _haskell_cabal_binary_impl(ctx):
         cabal_wrapper = ctx.executable._cabal_wrapper,
         package_database = package_database,
         verbose = ctx.attr.verbose,
-        dynamic_binary = binary,
+        dynamic_file = binary,
         transitive_haddocks = _gather_transitive_haddocks(ctx.attr.deps),
     )
     ctx.actions.run(
@@ -1247,28 +1258,32 @@ def _pin_packages(repository_ctx, resolved):
             ).sha256
 
             # stack also doesn't expose any subdirectories that need to be
-            # stripped. Here we assume the project root to be the root
-            # directory or underneath a top-level directory.
-            root = repository_ctx.path("{name}-{version}".format(**spec))
+            # stripped. Here we assume the project root to be the directory
+            # that contains the cabal file.
+            root = "{name}-{version}".format(**spec)
             cabal_file = "{name}.cabal".format(**spec)
-            if root.get_child(cabal_file).exists:
-                stripPrefix = ""
-            else:
-                subdirs = [
-                    subdir
-                    for subdir in root.readdir()
-                    if subdir.get_child(cabal_file).exists
-                ]
-                if len(subdirs) != 1:
-                    fail("Unsupported archive format at {url}: Expected {cabal} in the root or underneath a top-level directory".format(
-                        url = spec["location"]["url"],
-                        cabal = cabal_file,
-                    ))
-                stripPrefix = subdirs[0].basename
+            find_cmd = ["find", root, "-name", cabal_file]
+            if get_cpu_value(repository_ctx) == "x64_windows":
+                find_cmd = ["dir", "/s", "/b", root + "\\" + cabal_file]
+            subdirs = [
+                paths.relativize(line.strip(), root)
+                for line in _execute_or_fail_loudly(repository_ctx, [
+                    "find",
+                    root,
+                    "-name",
+                    cabal_file,
+                ]).stdout.splitlines()
+                if line.strip() != ""
+            ]
+            if len(subdirs) != 1:
+                fail("Unsupported archive format at {url}: Could not find {cabal} in the archive.".format(
+                    url = spec["location"]["url"],
+                    cabal = cabal_file,
+                ))
 
             spec["pinned"] = {
                 "sha256": sha256,
-                "strip-prefix": stripPrefix,
+                "strip-prefix": subdirs[0],
             }
         elif spec["location"]["type"] in ["git", "hg"]:
             # Bazel cannot cache git (or hg) repositories in the repository
