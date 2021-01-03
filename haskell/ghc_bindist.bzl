@@ -5,8 +5,9 @@ load("@bazel_tools//tools/cpp:lib_cc_configure.bzl", "get_cpu_value")
 load("@rules_sh//sh:posix.bzl", "sh_posix_configure")
 load(":private/workspace_utils.bzl", "execute_or_fail_loudly")
 
-_GHC_DEFAULT_VERSION = "8.6.5"  # If you change this, change stackage's version
+# If you change this, change stackage's version
 # in the start script (see stackage.org)
+_GHC_DEFAULT_VERSION = "8.6.5"
 
 # Generated with `bazel run @rules_haskell//haskell:gen-ghc-bindist`
 # To add a version or architecture, edit the constants in haskell/gen_ghc_bindist.py,
@@ -211,6 +212,20 @@ GHC_BINDIST = \
                 "e22586762af0911c06e8140f1792e3ca381a3a482a20d67b9054883038b3a422",
             ),
         },
+        "8.8.4": {
+            "darwin_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.4/ghc-8.8.4-x86_64-apple-darwin.tar.xz",
+                "e80a789e9d8cfb41dd87f3284b75432427c4461c1731d220d04ead8733ccdb5e",
+            ),
+            "linux_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.4/ghc-8.8.4-x86_64-deb8-linux.tar.xz",
+                "51a36892f1264744195274187298d13ac62bce2da86d4ddf76d8054ab90f2feb",
+            ),
+            "windows_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.4/ghc-8.8.4-x86_64-unknown-mingw32.tar.xz",
+                "d185055d2c8dc3bfe5b88afd59d6877eb1e722b672d1c9649f18296e148ed71f",
+            ),
+        },
         "8.10.1": {
             "darwin_amd64": (
                 "https://downloads.haskell.org/~ghc/8.10.1/ghc-8.10.1-x86_64-apple-darwin.tar.xz",
@@ -237,6 +252,20 @@ GHC_BINDIST = \
             "windows_amd64": (
                 "https://downloads.haskell.org/~ghc/8.10.2/ghc-8.10.2-x86_64-unknown-mingw32.tar.xz",
                 "dcae4c173b9896e07ff048de5509aa0a4537233150e06e5ce8848303dfadc176",
+            ),
+        },
+        "8.10.3": {
+            "darwin_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.3/ghc-8.10.3-x86_64-apple-darwin.tar.xz",
+                "2635f35d76e44e69afdfd37cae89d211975cc20f71f784363b72003e59f22015",
+            ),
+            "linux_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.3/ghc-8.10.3-x86_64-deb9-linux.tar.xz",
+                "95e4aadea30701fe5ab84d15f757926d843ded7115e11c4cd827809ca830718d",
+            ),
+            "windows_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.3/ghc-8.10.3-x86_64-unknown-mingw32.tar.xz",
+                "927a6c699533a115cd49772ef2c753d9af2c13bf9f0b2d3bd13645cc6a144ee3",
             ),
         },
     }
@@ -481,6 +510,7 @@ def ghc_bindist(
         "8.8.1": ["@rules_haskell//haskell:assets/ghc_8_8_1_win_base.patch"],
         "8.8.2": ["@rules_haskell//haskell:assets/ghc_8_8_2_win_base.patch"],
         "8.8.3": ["@rules_haskell//haskell:assets/ghc_8_8_3_win_base.patch"],
+        "8.8.4": ["@rules_haskell//haskell:assets/ghc_8_8_4_win_base.patch"],
     }.get(version) if target == "windows_amd64" else None
 
     extra_attrs = {"patches": patches, "patch_args": ["-p0"]} if patches else {}
