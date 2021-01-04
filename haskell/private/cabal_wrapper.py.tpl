@@ -28,8 +28,8 @@ import subprocess
 import sys
 import tempfile
 
-debug = False
-verbose = os.environ.get("CABAL_VERBOSE", "") == "True"
+debug = True
+verbose = True # os.environ.get("CABAL_VERBOSE", "") == "True"
 
 def run(cmd, *args, **kwargs):
     if debug:
@@ -153,7 +153,10 @@ with tmpdir() as distdir:
     os.putenv("TEMP", os.path.join(distdir, "tmp"))
     os.makedirs(os.path.join(distdir, "tmp"))
     runghc_args = [arg.replace("./", execroot + "/") for arg in runghc_args]
-    run([runghc] + runghc_args + [setup, "configure", \
+    run([runghc] + runghc_args + ["--", "-v5"] +
+        [ flag.replace("$CC", cc) for flag in %{ghc_cc_args} ] +
+        ["--"] +
+        [setup, "configure", \
         component, \
         "--verbose=0", \
         "--user", \

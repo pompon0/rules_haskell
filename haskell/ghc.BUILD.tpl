@@ -19,7 +19,7 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "bin",
-    srcs = glob(["bin/*"]),
+    srcs = glob(["bin/*","lib/**"]),
 )
 
 # Expose embedded MinGW toolchain when on Windows.

@@ -429,13 +429,16 @@ def _haskell_cabal_library_impl(ctx):
         cabalopts = user_cabalopts,
         flags = ctx.attr.flags,
         generate_haddock = ctx.attr.haddock,
-        cabal_wrapper = ctx.executable._cabal_wrapper,
+        cabal_wrapper = ctx.attr._cabal_wrapper[DefaultInfo].files_to_run,
         package_database = package_database,
         verbose = ctx.attr.verbose,
         is_library = True,
         dynamic_file = dynamic_library,
         transitive_haddocks = _gather_transitive_haddocks(ctx.attr.deps),
     )
+    print("[1] cabal_wrapper = ",ctx.attr._cabal_wrapper[DefaultInfo])
+    print("files_to_run.executable = ",ctx.attr._cabal_wrapper[DefaultInfo].files_to_run.executable)
+    print("files_to_run.runfiles_manifest = ",ctx.attr._cabal_wrapper[DefaultInfo].files_to_run.runfiles_manifest)
     outputs = [
         package_database,
         interfaces_dir,
@@ -453,7 +456,7 @@ def _haskell_cabal_library_impl(ctx):
         arguments = [c.args],
         inputs = c.inputs,
         input_manifests = c.input_manifests,
-        tools = [c.cabal_wrapper],
+        tools = ctx.attr._cabal_wrapper[DefaultInfo].default_runfiles.files, # + hs.tools.all_bin,
         outputs = outputs,
         env = c.env,
         mnemonic = "HaskellCabalLibrary",
@@ -692,6 +695,7 @@ def _haskell_cabal_binary_impl(ctx):
         sibling = cabal,
     )
     (tool_inputs, tool_input_manifests) = ctx.resolve_tools(tools = ctx.attr.tools)
+    print("[2] cabal_wrapper = ",ctx.executable._cabal_wrapper)
     c = _prepare_cabal_inputs(
         hs,
         cc,
@@ -711,7 +715,7 @@ def _haskell_cabal_binary_impl(ctx):
         cabalopts = user_cabalopts,
         flags = ctx.attr.flags,
         generate_haddock = False,
-        cabal_wrapper = ctx.executable._cabal_wrapper,
+        cabal_wrapper = ctx.attr._cabal_wrapper[DefaultInfo].files_to_run.executable,
         package_database = package_database,
         verbose = ctx.attr.verbose,
         dynamic_file = binary,
@@ -727,7 +731,7 @@ def _haskell_cabal_binary_impl(ctx):
             binary,
             data_dir,
         ],
-        tools = [c.cabal_wrapper],
+        tools = ctx.attr._cabal_wrapper[DefaultInfo].default_runfiles.files, # + hs.tools.all_bin,
         env = c.env,
         mnemonic = "HaskellCabalBinary",
         progress_message = "HaskellCabalBinary {}".format(hs.label),

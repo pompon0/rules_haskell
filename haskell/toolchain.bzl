@@ -111,6 +111,7 @@ def _haskell_toolchain_impl(ctx):
     ctx.actions.run_shell(
         inputs = [ghc_pkg],
         outputs = [pkgdb_file],
+        tools = ctx.files.tools,
         mnemonic = "HaskellPackageDatabaseDump",
         command = "{ghc_pkg} dump --global > {output}".format(
             ghc_pkg = ghc_pkg.path,
@@ -122,6 +123,7 @@ def _haskell_toolchain_impl(ctx):
         name.replace("-", "_"): file
         for name, file in ghc_binaries.items()
     }
+    tools_struct_args["all_bin"] = ctx.files.tools
 
     locale_archive = None
 

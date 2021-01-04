@@ -176,11 +176,12 @@ def ghc_cc_program_args(cc):
     """
     args = [
         # GHC uses C compiler for assemly, linking and preprocessing as well.
+        # TODO: For unknown reason pgml gets ignored when it is set after pgma/pgmc.
+        "-pgml",
+        cc,
         "-pgma",
         cc,
         "-pgmc",
-        cc,
-        "-pgml",
         cc,
         # Setting -pgm* flags explicitly has the unfortunate side effect
         # of resetting any program flags in the GHC settings file. So we

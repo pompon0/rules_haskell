@@ -18,7 +18,7 @@ def _cabal_wrapper_impl(ctx):
         ar = "/usr/bin/ar"
 
     cabal_wrapper_tpl = ctx.file._cabal_wrapper_tpl
-    cabal_wrapper = hs.actions.declare_file("cabal_wrapper.py")
+    cabal_wrapper = hs.actions.declare_file(ctx.attr.name)
     cc = hs_toolchain.cc_wrapper.executable.path
     hs.actions.expand_template(
         template = cabal_wrapper_tpl,
@@ -36,12 +36,18 @@ def _cabal_wrapper_impl(ctx):
             "%{ghc_cc_args}": repr(ghc_cc_program_args("$CC")),
         },
     )
+    rf = hs.toolchain.cc_wrapper.runfiles.merge(ctx.runfiles(
+        transitive_files = cc_toolchain.all_files,
+        collect_data = True,
+    )).merge(ctx.runfiles(
+      transitive_files = depset(hs.tools.all_bin),
+      collect_data = True,
+    ))
+    for f in rf.files.to_list():
+      print(f)
     return [DefaultInfo(
         files = depset([cabal_wrapper]),
-        runfiles = hs.toolchain.cc_wrapper.runfiles.merge(ctx.runfiles(
-            transitive_files = cc_toolchain.all_files,
-            collect_data = True,
-        )),
+        runfiles = rf, 
     )]
 
 _cabal_wrapper = rule(

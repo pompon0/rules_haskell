@@ -937,6 +937,7 @@ def print_file_name(filename, args):
 
     # Note, gcc --print-file-name does not fail if the file was not found, but
     # instead just returns the input filename.
+    print("filename =",filename,"; found =",found,file=sys.stderr)
     if found:
         print(found)
     else:
