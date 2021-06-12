@@ -67,12 +67,16 @@ stack_snapshot(
         "text",
         "vector",
         # For tests
+        "c2hs",
         "cabal-doctest",
+        "doctest",
         "polysemy",
         "network",
         "language-c",
         "streaming",
         "void",
+        "ghc-paths",
+        "ghc-check-0.5.0.3",
         "hspec",
         "hspec-core",
         "lens-family-core",
@@ -81,11 +85,12 @@ stack_snapshot(
         "proto-lens-protoc",
         "proto-lens-runtime",
         "lens-family",
+        "safe-exceptions",
         "temporary",
     ],
     setup_deps = {"polysemy": ["cabal-doctest"]},
     snapshot = test_stack_snapshot,
-    stack_snapshot_json = "//:stackage_snapshot.json",
+    stack_snapshot_json = "//:stackage_snapshot.json" if not is_windows else None,
     tools = [
         # This is not required, as `stack_snapshot` would build alex
         # automatically, however it is used as a test for user provided
@@ -98,10 +103,17 @@ stack_snapshot(
 # In a separate repo because not all platforms support zlib.
 stack_snapshot(
     name = "stackage-zlib",
-    extra_deps = {"zlib": ["@zlib.dev//:zlib" if is_nix_shell else "@zlib.hs//:zlib"]},
+    extra_deps = {"zlib": ["//tests:zlib"]},
     packages = ["zlib"],
     snapshot = test_stack_snapshot,
-    stack_snapshot_json = "//:stackage-zlib-snapshot.json",
+    stack_snapshot_json = "//:stackage-zlib-snapshot.json" if not is_windows else None,
+)
+
+stack_snapshot(
+    name = "stackage-pinning-test",
+    local_snapshot = "//:stackage-pinning-test.yaml",
+    packages = ["hspec"],
+    stack_snapshot_json = "//:stackage-pinning-test_snapshot.json" if not is_windows else None,
 )
 
 stack_snapshot(
@@ -110,11 +122,11 @@ stack_snapshot(
         "lib",
         "exe",
     ]},
-    extra_deps = {"zlib": ["@zlib.dev//:zlib" if is_nix_shell else "@zlib.hs//:zlib"]},
+    extra_deps = {"zlib": ["//tests:zlib"]},
     haddock = False,
     local_snapshot = "//:ghcide-stack-snapshot.yaml",
     packages = ["ghcide"],
-    stack_snapshot_json = "//:ghcide-snapshot.json",
+    stack_snapshot_json = "//:ghcide-snapshot.json" if not is_windows else None,
 )
 
 load(
@@ -127,12 +139,9 @@ load(
 
 http_archive(
     name = "rules_proto",
-    sha256 = "73ebe9d15ba42401c785f9d0aeebccd73bd80bf6b8ac78f74996d31f2c0ad7a6",
-    strip_prefix = "rules_proto-2c0468366367d7ed97a1f702f9cd7155ab3f73c5",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_proto/archive/2c0468366367d7ed97a1f702f9cd7155ab3f73c5.tar.gz",
-        "https://github.com/bazelbuild/rules_proto/archive/2c0468366367d7ed97a1f702f9cd7155ab3f73c5.tar.gz",
-    ],
+    sha256 = "9fc210a34f0f9e7cc31598d109b5d069ef44911a82f507d5a88716db171615a8",
+    strip_prefix = "rules_proto-f7a30f6f80006b591fa7c437fe5a951eb10bcbcf",
+    urls = ["https://github.com/bazelbuild/rules_proto/archive/f7a30f6f80006b591fa7c437fe5a951eb10bcbcf.tar.gz"],
 )
 
 load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_proto_toolchains")
@@ -207,8 +216,8 @@ register_toolchains(
 )
 
 nixpkgs_cc_configure(
-    nix_file = "//nixpkgs:cc-toolchain.nix",
-    nix_file_deps = ["//nixpkgs:default.nix"],
+    # Don't override the default cc toolchain needed for bindist mode.
+    name = "nixpkgs_config_cc",
     repository = "@nixpkgs_default",
 )
 
@@ -233,18 +242,6 @@ cc_library(
   includes = ["include"],
 )
     """,
-    repository = "@nixpkgs_default",
-)
-
-nixpkgs_package(
-    name = "c2hs",
-    attribute_path = "haskell.packages.ghc883.c2hs",
-    repository = "@nixpkgs_default",
-)
-
-nixpkgs_package(
-    name = "doctest",
-    attribute_path = "haskell.packages.ghc883.doctest",
     repository = "@nixpkgs_default",
 )
 
@@ -288,6 +285,13 @@ cc_library(
     hdrs = [":include"],
     strip_include_prefix = "include",
     visibility = ["//visibility:public"],
+    # This rule only bundles headers and a library and doesn't compile or link by itself.
+    # We set linkstatic = 1 to quiet to quiet the following warning:
+    #
+    #   in linkstatic attribute of cc_library rule @zlib.dev//:zlib:
+    #   setting 'linkstatic=1' is recommended if there are no object files.
+    #
+    linkstatic = 1,
 )
 """,
     repository = "@nixpkgs_default",
@@ -326,6 +330,9 @@ cc_library(
     name = "z",
     srcs = glob(["*.c"]),
     hdrs = glob(["*.h"]),
+    # Needed because XCode 12.0 Clang errors by default.
+    # See https://developer.apple.com/documentation/xcode-release-notes/xcode-12-release-notes.
+    copts = ["-Wno-error=implicit-function-declaration"],
     # Cabal packages depending on dynamic C libraries fail on MacOS
     # due to `-rpath` flags being forwarded indiscriminately.
     # See https://github.com/tweag/rules_haskell/issues/1317
@@ -393,14 +400,11 @@ nixpkgs_package(
 
 http_archive(
     name = "build_bazel_rules_nodejs",
-    sha256 = "9901bc17138a79135048fb0c107ee7a56e91815ec6594c08cb9a17b80276d62b",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_nodejs/releases/download/0.40.0/rules_nodejs-0.40.0.tar.gz",
-        "https://github.com/bazelbuild/rules_nodejs/releases/download/0.40.0/rules_nodejs-0.40.0.tar.gz",
-    ],
+    sha256 = "dd4dc46066e2ce034cba0c81aa3e862b27e8e8d95871f567359f7a534cccb666",
+    urls = ["https://github.com/bazelbuild/rules_nodejs/releases/download/3.1.0/rules_nodejs-3.1.0.tar.gz"],
 )
 
-load("@build_bazel_rules_nodejs//:defs.bzl", "node_repositories")
+load("@build_bazel_rules_nodejs//:index.bzl", "node_repositories")
 
 node_repositories(
     vendored_node = "@nixpkgs_nodejs",
@@ -408,12 +412,9 @@ node_repositories(
 
 http_archive(
     name = "io_bazel_rules_sass",
-    sha256 = "d5e0c0d16fb52f3dcce5bd7830d92d4813eb01bac0211119e74ec9e65eaf3b86",
-    strip_prefix = "rules_sass-1.23.3",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_sass/archive/1.23.3.tar.gz",
-        "https://github.com/bazelbuild/rules_sass/archive/1.23.3.tar.gz",
-    ],
+    sha256 = "6e547fe6fe0ac66f464dd06c8903fc82f77826f40e3fe869b41886bef582c2fe",
+    strip_prefix = "rules_sass-1.32.6",
+    urls = ["https://github.com/bazelbuild/rules_sass/archive/1.32.6.tar.gz"],
 )
 
 load("@io_bazel_rules_sass//:package.bzl", "rules_sass_dependencies")
@@ -458,21 +459,18 @@ register_toolchains(
 
 http_archive(
     name = "io_bazel_rules_go",
-    sha256 = "b9aa86ec08a292b97ec4591cf578e020b35f98e12173bbd4a921f84f583aebd9",
+    sha256 = "4d838e2d70b955ef9dd0d0648f673141df1bc1d7ecf5c2d621dcc163f47dd38a",
     urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.20.2/rules_go-v0.20.2.tar.gz",
-        "https://github.com/bazelbuild/rules_go/releases/download/v0.20.2/rules_go-v0.20.2.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.24.12/rules_go-v0.24.12.tar.gz",
+        "https://github.com/bazelbuild/rules_go/releases/download/v0.24.12/rules_go-v0.24.12.tar.gz",
     ],
 )
 
 http_archive(
     name = "com_github_bazelbuild_buildtools",
-    sha256 = "f3ef44916e6be705ae862c0520bac6834dd2ff1d4ac7e5abc61fe9f12ce7a865",
-    strip_prefix = "buildtools-0.29.0",
-    urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/buildtools/archive/0.29.0.tar.gz",
-        "https://github.com/bazelbuild/buildtools/archive/0.29.0.tar.gz",
-    ],
+    sha256 = "0d3ca4ed434958dda241fb129f77bd5ef0ce246250feed2d5a5470c6f29a77fa",
+    strip_prefix = "buildtools-4.0.0",
+    urls = ["https://github.com/bazelbuild/buildtools/archive/4.0.0.tar.gz"],
 )
 
 # A repository that generates the Go SDK imports, see ./tools/go_sdk/README

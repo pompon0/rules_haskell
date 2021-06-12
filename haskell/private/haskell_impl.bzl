@@ -50,6 +50,7 @@ load(":providers.bzl", "GhcPluginInfo", "HaskellCoverageInfo")
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_skylib//lib:collections.bzl", "collections")
 load("@bazel_skylib//lib:shell.bzl", "shell")
+load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 
 def _prepare_srcs(srcs):
     srcs_files = []
@@ -317,7 +318,7 @@ def _haskell_binary_common_impl(ctx, is_test):
             ctx.file._bash_runfiles,
             hs.toolchain.tools.hpc,
             binary,
-        ] + mix_runfiles + srcs_runfiles + solibs
+        ] + mix_runfiles + srcs_runfiles
 
     return [
         hs_info,
@@ -326,7 +327,7 @@ def _haskell_binary_common_impl(ctx, is_test):
             executable = executable,
             files = target_files,
             runfiles = ctx.runfiles(
-                files = extra_runfiles,
+                files = extra_runfiles + solibs,
                 collect_data = True,
             ),
         ),
@@ -532,33 +533,37 @@ def haskell_library_impl(ctx):
     # Create a CcInfo provider so that CC rules can work with
     # a haskell library as if it was a regular CC one.
 
-    # XXX Workaround https://github.com/bazelbuild/bazel/issues/6874.
-    # Should be find_cpp_toolchain() instead.
-    cc_toolchain = ctx.attr._cc_toolchain[cc_common.CcToolchainInfo]
+    # XXX: protobuf is passing a "patched ctx"
+    # which includes the real ctx as "real_ctx"
+    real_ctx = getattr(ctx, "real_ctx", ctx)
+    cc_toolchain = find_cpp_toolchain(real_ctx)
     feature_configuration = cc_common.configure_features(
-        # XXX: protobuf is passing a "patched ctx"
-        # which includes the real ctx as "real_ctx"
-        ctx = getattr(ctx, "real_ctx", ctx),
+        ctx = real_ctx,
         cc_toolchain = cc_toolchain,
         requested_features = ctx.features,
         unsupported_features = ctx.disabled_features,
     )
     if dynamic_library or static_library:
-        libraries_to_link = [
-            cc_common.create_library_to_link(
-                actions = ctx.actions,
-                feature_configuration = feature_configuration,
-                dynamic_library = dynamic_library,
-                dynamic_library_symlink_path = dynamic_library.basename if dynamic_library else "",
-                static_library = static_library,
-                cc_toolchain = cc_toolchain,
+        linker_inputs = [
+            cc_common.create_linker_input(
+                owner = ctx.label,
+                libraries = depset(direct = [
+                    cc_common.create_library_to_link(
+                        actions = ctx.actions,
+                        feature_configuration = feature_configuration,
+                        dynamic_library = dynamic_library,
+                        dynamic_library_symlink_path = dynamic_library.basename if dynamic_library else "",
+                        static_library = static_library,
+                        cc_toolchain = cc_toolchain,
+                    ),
+                ]),
             ),
         ]
     else:
-        libraries_to_link = []
+        linker_inputs = []
     compilation_context = cc_common.create_compilation_context()
     linking_context = cc_common.create_linking_context(
-        libraries_to_link = libraries_to_link,
+        linker_inputs = depset(direct = linker_inputs),
     )
     out_cc_info = cc_common.merge_cc_infos(
         cc_infos = [
@@ -650,9 +655,7 @@ def haskell_toolchain_libraries_impl(ctx):
     with_profiling = is_profiling_enabled(hs)
     with_threaded = "-threaded" in hs.toolchain.compiler_flags
 
-    # XXX Workaround https://github.com/bazelbuild/bazel/issues/6874.
-    # Should be find_cpp_toolchain() instead.
-    cc_toolchain = ctx.attr._cc_toolchain[cc_common.CcToolchainInfo]
+    cc_toolchain = find_cpp_toolchain(ctx)
     feature_configuration = cc_common.configure_features(
         ctx = ctx,
         cc_toolchain = cc_toolchain,
@@ -727,25 +730,30 @@ def haskell_toolchain_libraries_impl(ctx):
                 if with_threaded:
                     libs["ffi"]["static"] = libs["Cffi_thr"]["static"]
                 libs.pop("Cffi_thr")
-        libraries_to_link = [
-            cc_common.create_library_to_link(
-                actions = ctx.actions,
-                feature_configuration = feature_configuration,
-                dynamic_library = lib.get("dynamic", None),
-                dynamic_library_symlink_path =
-                    _toolchain_library_symlink(lib["dynamic"]) if lib.get("dynamic") else "",
-                static_library = lib.get("static", None),
-                cc_toolchain = cc_toolchain,
-            )
-            for lib in libs.values()
+        linker_inputs = [
+            cc_common.create_linker_input(
+                owner = ctx.label,
+                libraries = depset(direct = [
+                    cc_common.create_library_to_link(
+                        actions = ctx.actions,
+                        feature_configuration = feature_configuration,
+                        dynamic_library = lib.get("dynamic", None),
+                        dynamic_library_symlink_path =
+                            _toolchain_library_symlink(lib["dynamic"]) if lib.get("dynamic") else "",
+                        static_library = lib.get("static", None),
+                        cc_toolchain = cc_toolchain,
+                    )
+                    for lib in libs.values()
+                ]),
+                user_link_flags = depset(direct = target[HaskellImportHack].linkopts),
+            ),
         ]
         compilation_context = cc_common.create_compilation_context(
             headers = target[HaskellImportHack].headers,
             includes = target[HaskellImportHack].includes,
         )
         linking_context = cc_common.create_linking_context(
-            libraries_to_link = libraries_to_link,
-            user_link_flags = target[HaskellImportHack].linkopts,
+            linker_inputs = depset(direct = linker_inputs),
         )
         cc_info = CcInfo(
             compilation_context = compilation_context,

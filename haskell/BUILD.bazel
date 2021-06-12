@@ -1,5 +1,5 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 load(
     "@rules_haskell//haskell:private/haskell_impl.bzl",
     "haskell_toolchain_libraries",
@@ -13,6 +13,10 @@ load(
     "cabal_wrapper",
 )
 load(
+    "@rules_haskell//haskell:private/runghc.bzl",
+    "runghc",
+)
+load(
     "@rules_haskell//haskell:toolchain_info.bzl",
     "haskell_toolchain_info",
 )
@@ -21,7 +25,7 @@ exports_files(
     glob(["*.bzl"]) + [
         "assets/ghci_script",
         "private/cabal_wrapper.sh.tpl",
-        "private/cabal_wrapper.py.tpl",
+        "private/cabal_wrapper.py",
         "private/coverage_wrapper.sh.tpl",
         "private/ghci_repl_wrapper.sh",
         "private/haddock_wrapper.sh.tpl",
@@ -92,10 +96,23 @@ py_binary(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "package_configuration",
+    srcs = ["private/package_configuration.py"],
+    imports = ["private"],
+    visibility = ["//tests/package_configuration:__subpackages__"],
+)
+
+runghc(
+    name = "runghc",
+    visibility = ["//visibility:public"],
+)
+
 py_binary(
     name = "ls_modules",
     srcs = ["private/ls_modules.py"],
     visibility = ["//visibility:public"],
+    deps = [":package_configuration"],
 )
 
 sh_binary(

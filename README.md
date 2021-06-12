@@ -2,9 +2,7 @@
 
 # Haskell rules for [Bazel][bazel]
 
-[![Build status](https://badge.buildkite.com/e2c5c0df5e33572bab10dbf230b6f2204f1fcce51c42fdc760.svg?branch=master)](https://buildkite.com/tweag-1/rules-haskell)
-[![CircleCI](https://circleci.com/gh/tweag/rules_haskell.svg?style=svg)](https://circleci.com/gh/tweag/rules_haskell)
-[![Build Status](https://dev.azure.com/tweag/rules_haskell/_apis/build/status/tweag.rules_haskell?branchName=master)](https://dev.azure.com/tweag/rules_haskell/_build/latest?definitionId=1?branchName=master)
+[![Continuous integration](https://github.com/tweag/rules_haskell/workflows/Continuous%20integration/badge.svg)](https://github.com/tweag/rules_haskell/actions?query=branch%3Amaster)
 
 Bazel automates building and testing software. It scales to very large
 multi-language projects. This project extends Bazel with build rules
@@ -23,7 +21,7 @@ The full reference documentation for rules is at https://haskell.build.
 
 ## Setup
 
-You'll need [Bazel >= 0.29][bazel-getting-started] installed.
+You'll need [Bazel >= 2.1][bazel-getting-started] installed.
 
 If you are on NixOS, skip to the [Nixpkgs](#Nixpkgs) section.
 
@@ -373,14 +371,13 @@ You copy that hash to `url` in
 change the `sha256` or it will use the old version. Please update the
 date comment to the date of the `nixpkgs` commit you are pinning to.
 
-### CircleCI
+### GitHub Actions Cache
 
-Pull Requests are checked by CircleCI.
-
-If a check fails and you cannot reproduce it locally (e.g. it failed on Darwin
-and you only run Linux), you can [ssh into CircleCI to aid debugging][ci-ssh].
-
-[ci-ssh]: https://circleci.com/docs/2.0/ssh-access-jobs/
+The GitHub actions CI pipeline uses
+[`actions/cache`](https://github.com/actions/cache) to store the Bazel
+repository cache. The `cache-version` must be updated manually in the `env`
+section in the [workflow](./.github/workflows/workflow.yaml) to invalidate the
+cache if any cacheable external dependencies are changed.
 
 #### “unable to start any build”
 

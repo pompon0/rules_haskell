@@ -2,10 +2,11 @@
 
 load("@bazel_skylib//lib:dicts.bzl", "dicts")
 load("@bazel_skylib//lib:paths.bzl", "paths")
-load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
+load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe", "read_netrc", "use_netrc")
 load("//vendor/bazel_json/lib:json_parser.bzl", "json_parse")
+load("@bazel_tools//tools/cpp:lib_cc_configure.bzl", "get_cpu_value")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
-load(":cc.bzl", "cc_interop_info")
+load(":cc.bzl", "cc_interop_info", "ghc_cc_program_args")
 load(":private/actions/info.bzl", "library_info_output_groups")
 load(":private/context.bzl", "haskell_context", "render_env")
 load(":private/dependencies.bzl", "gather_dep_info")
@@ -40,6 +41,37 @@ load(
     "get_library_files",
     "haskell_cc_libraries_aspect",
 )
+
+def _get_auth(ctx, urls):
+    """Find the .netrc file and obtain the auth dict for the required URLs.
+
+    Refer to the [authentication in downloads proposal][auth-proposal] and the
+    [`http_archive` API documentation][http-archive] for a definition of the
+    auth dict.
+
+    [auth-proposal]: https://github.com/bazelbuild/proposals/blob/master/designs/2019-05-27-auth.md
+    [http-archive]: https://docs.bazel.build/versions/master/repo/http.html#http_archive-auth_patterns
+    """
+    auth_patterns = {"api.github.com": "Bearer <password>"}
+
+    # Taken from @bazel_tools//tools/build_defs/repo:http.bzl
+    if ctx.attr.netrc:
+        netrc = read_netrc(ctx, ctx.attr.netrc)
+        return use_netrc(netrc, urls, auth_patterns)
+
+    if "HOME" in ctx.os.environ and not ctx.os.name.startswith("windows"):
+        netrcfile = "%s/.netrc" % (ctx.os.environ["HOME"])
+        if ctx.execute(["test", "-f", netrcfile]).return_code == 0:
+            netrc = read_netrc(ctx, netrcfile)
+            return use_netrc(netrc, urls, auth_patterns)
+
+    if "USERPROFILE" in ctx.os.environ and ctx.os.name.startswith("windows"):
+        netrcfile = "%s/.netrc" % (ctx.os.environ["USERPROFILE"])
+        if ctx.path(netrcfile).exists:
+            netrc = read_netrc(ctx, netrcfile)
+            return use_netrc(netrc, urls, auth_patterns)
+
+    return {}
 
 def _so_extension(hs):
     return "dylib" if hs.toolchain.is_darwin else "so"
@@ -104,6 +136,7 @@ _EMPTY_PACKAGES_BLACKLIST = [
     "fail",
     "mtl-compat",
     "nats",
+    "ghc-byteorder",
 ]
 
 def _cabal_tool_flag(tool):
@@ -117,10 +150,38 @@ def _binary_paths(binaries):
 def _concat(sequences):
     return [item for sequence in sequences for item in sequence]
 
+def _uniquify(xs):
+    return depset(xs).to_list()
+
+def _cabal_toolchain_info(hs, cc, workspace_name, runghc):
+    """Yields a struct containing the toolchain information needed by the cabal wrapper"""
+
+    # If running on darwin but XCode is not installed (i.e., only the Command
+    # Line Tools are available), then Bazel will make ar_executable point to
+    # "/usr/bin/libtool". Since we call ar directly, override it.
+    # TODO: remove this if Bazel fixes its behavior.
+    # Upstream ticket: https://github.com/bazelbuild/bazel/issues/5127.
+    ar = cc.tools.ar
+    if ar.find("libtool") >= 0:
+        ar = "/usr/bin/ar"
+
+    return struct(
+        ghc = hs.tools.ghc.path,
+        ghc_pkg = hs.tools.ghc_pkg.path,
+        runghc = runghc.path,
+        ar = ar,
+        cc = cc.tools.cc,
+        strip = cc.tools.strip,
+        is_windows = hs.toolchain.is_windows,
+        workspace = workspace_name,
+        ghc_cc_args = ghc_cc_program_args("$CC"),
+    )
+
 def _prepare_cabal_inputs(
         hs,
         cc,
         posix,
+        workspace_name,
         dep_info,
         cc_info,
         direct_cc_info,
@@ -137,10 +198,12 @@ def _prepare_cabal_inputs(
         flags,
         generate_haddock,
         cabal_wrapper,
+        runghc,
         package_database,
         verbose,
         transitive_haddocks,
-        dynamic_binary = None):
+        is_library = False,
+        dynamic_file = None):
     """Compute Cabal wrapper, arguments, inputs."""
     with_profiling = is_profiling_enabled(hs)
 
@@ -184,7 +247,7 @@ def _prepare_cabal_inputs(
     # action.
     transitive_compile_libs = get_ghci_library_files(hs, cc.cc_libraries_info, cc.transitive_libraries)
     transitive_link_libs = _concat(get_library_files(hs, cc.cc_libraries_info, cc.transitive_libraries))
-    env = dict(hs.env)
+    env = dicts.add(hs.env, cc.env)
     env["PATH"] = join_path_list(hs, _binary_paths(tool_inputs) + posix.paths)
     if hs.toolchain.is_darwin:
         env["SDKROOT"] = "macosx"  # See haskell/private/actions/link.bzl
@@ -192,7 +255,6 @@ def _prepare_cabal_inputs(
     if verbose:
         env["CABAL_VERBOSE"] = "True"
 
-    args = hs.actions.args()
     package_databases = dep_info.package_databases
     transitive_headers = cc_info.compilation_context.headers
     direct_include_dirs = depset(transitive = [
@@ -201,35 +263,35 @@ def _prepare_cabal_inputs(
         direct_cc_info.compilation_context.system_includes,
     ])
     direct_lib_dirs = [file.dirname for file in direct_libs]
-    args.add_all([component, package_id, generate_haddock, setup, cabal.dirname, package_database.dirname])
-    args.add_joined([
-        arg
+    runghc_args = [
+        "--ghc-arg=" + arg
         for package_id in setup_deps
         for arg in ["-package-id", package_id]
     ] + [
-        arg
+        "--ghc-arg=" + arg
         for package_db in setup_dep_info.package_databases.to_list()
         for arg in ["-package-db", "./" + _dirname(package_db)]
-    ], join_with = " ", format_each = "--ghc-arg=%s", omit_if_empty = False)
-    args.add("--flags=" + " ".join(flags))
-    if not hs.toolchain.is_darwin and not hs.toolchain.is_windows:
+    ]
+    extra_args = ["--flags=" + " ".join(flags)]
+    if dynamic_file:
         # See Note [No PIE when linking] in haskell/private/actions/link.bzl
-        args.add("--ghc-option=-optl-no-pie")
-    args.add_all(hs.toolchain.cabalopts)
-    args.add_all(cabalopts)
-    if dynamic_binary:
-        args.add_all(
+        if not (hs.toolchain.is_darwin or hs.toolchain.is_windows):
+            version = [int(x) for x in hs.toolchain.version.split(".")]
+            if version < [8, 10] or not is_library:
+                extra_args.append("--ghc-option=-optl-no-pie")
+    extra_args.extend(hs.toolchain.cabalopts + cabalopts)
+    if dynamic_file:
+        extra_args.extend(_uniquify(
             [
                 "--ghc-option=-optl-Wl,-rpath," + create_rpath_entry(
-                    binary = dynamic_binary,
+                    binary = dynamic_file,
                     dependency = lib,
                     keep_filename = False,
                     prefix = relative_rpath_prefix(hs.toolchain.is_darwin),
                 )
                 for lib in dynamic_libs
             ],
-            uniquify = True,
-        )
+        ))
 
     # When building in a static context, we need to make sure that Cabal passes
     # a couple of options that ensure any static code it builds can be linked
@@ -250,32 +312,49 @@ def _prepare_cabal_inputs(
     #   the linker used by `hsc2hs` (which will be our own wrapper script which
     #   eventually calls `gcc`, etc.).
     if hs.toolchain.static_runtime:
-        args.add("--ghc-option=-fPIC")
+        extra_args.append("--ghc-option=-fPIC")
 
         if not hs.toolchain.is_windows:
-            args.add("--ghc-option=-fexternal-dynamic-refs")
+            extra_args.append("--ghc-option=-fexternal-dynamic-refs")
 
     if hs.toolchain.fully_static_link:
-        args.add("--hsc2hs-option=--lflag=-static")
+        extra_args.append("--hsc2hs-option=--lflag=-static")
 
     if hs.features.fully_static_link:
-        args.add("--ghc-option=-optl-static")
+        extra_args.append("--ghc-option=-optl-static")
 
-    args.add("--")
-    args.add_all(package_databases, map_each = _dirname, format_each = "--package-db=%s")
-    args.add_all(direct_include_dirs, format_each = "--extra-include-dirs=%s")
-    args.add_all(direct_lib_dirs, format_each = "--extra-lib-dirs=%s", uniquify = True)
+    path_args = [
+        "--package-db=" + _dirname(db)
+        for db in package_databases.to_list()
+    ] + [
+        "--extra-include-dirs=" + d
+        for d in direct_include_dirs.to_list()
+    ] + _uniquify(["--extra-lib-dirs=" + d for d in direct_lib_dirs])
     if with_profiling:
-        args.add("--enable-profiling")
+        extra_args.append("--enable-profiling")
 
     # Redundant with _binary_paths() above, but better be explicit when we can.
-    args.add_all(tool_inputs, map_each = _cabal_tool_flag)
+    path_args.extend([_cabal_tool_flag(tool_flag) for tool_flag in tool_inputs.to_list() if _cabal_tool_flag(tool_flag)])
+
+    args = struct(
+        component = component,
+        pkg_name = package_id,
+        generate_haddock = generate_haddock,
+        setup_path = setup.path,
+        pkg_dir = cabal.dirname,
+        package_db_path = package_database.dirname,
+        runghc_args = runghc_args,
+        extra_args = extra_args,
+        path_args = path_args,
+        toolchain_info = _cabal_toolchain_info(hs, cc, workspace_name, runghc),
+    )
 
     inputs = depset(
-        [setup, hs.tools.ghc, hs.tools.ghc_pkg, hs.tools.runghc],
+        [setup, hs.tools.ghc, hs.tools.ghc_pkg],
         transitive = [
             depset(srcs),
             depset(cc.files),
+            depset(hs.toolchain.files),
             package_databases,
             setup_dep_info.package_databases,
             transitive_headers,
@@ -406,6 +485,7 @@ def _haskell_cabal_library_impl(ctx):
         hs,
         cc,
         posix,
+        ctx.workspace_name,
         dep_info,
         cc_info,
         direct_cc_info,
@@ -424,9 +504,11 @@ def _haskell_cabal_library_impl(ctx):
         flags = ctx.attr.flags,
         generate_haddock = ctx.attr.haddock,
         cabal_wrapper = ctx.executable._cabal_wrapper,
+        runghc = ctx.executable._runghc,
         package_database = package_database,
         verbose = ctx.attr.verbose,
-        dynamic_binary = dynamic_library,
+        is_library = True,
+        dynamic_file = dynamic_library,
         transitive_haddocks = _gather_transitive_haddocks(ctx.attr.deps),
     )
     outputs = [
@@ -441,12 +523,16 @@ def _haskell_cabal_library_impl(ctx):
         outputs.append(dynamic_library)
     if with_profiling:
         outputs.append(profiling_library)
+
+    (_, runghc_manifest) = ctx.resolve_tools(tools = [ctx.attr._runghc])
+    json_args = ctx.actions.declare_file("{}_cabal_wrapper_args.json".format(ctx.label.name))
+    ctx.actions.write(json_args, c.args.to_json())
     ctx.actions.run(
         executable = c.cabal_wrapper,
-        arguments = [c.args],
-        inputs = c.inputs,
-        input_manifests = c.input_manifests,
-        tools = [c.cabal_wrapper],
+        arguments = [json_args.path],
+        inputs = depset([json_args], transitive = [c.inputs]),
+        input_manifests = c.input_manifests + runghc_manifest,
+        tools = [c.cabal_wrapper, ctx.executable._runghc],
         outputs = outputs,
         env = c.env,
         mnemonic = "HaskellCabalLibrary",
@@ -493,18 +579,23 @@ def _haskell_cabal_library_impl(ctx):
         requested_features = ctx.features,
         unsupported_features = ctx.disabled_features,
     )
-    library_to_link = cc_common.create_library_to_link(
-        actions = ctx.actions,
-        feature_configuration = feature_configuration,
-        dynamic_library = dynamic_library,
-        dynamic_library_symlink_path =
-            _shorten_library_symlink(dynamic_library) if dynamic_library and ctx.attr.unique_name else "",
-        static_library = static_library,
-        cc_toolchain = cc_toolchain,
+    linker_input = cc_common.create_linker_input(
+        owner = ctx.label,
+        libraries = depset(direct = [
+            cc_common.create_library_to_link(
+                actions = ctx.actions,
+                feature_configuration = feature_configuration,
+                dynamic_library = dynamic_library,
+                dynamic_library_symlink_path =
+                    _shorten_library_symlink(dynamic_library) if dynamic_library and ctx.attr.unique_name else "",
+                static_library = static_library,
+                cc_toolchain = cc_toolchain,
+            ),
+        ]),
     )
     compilation_context = cc_common.create_compilation_context()
     linking_context = cc_common.create_linking_context(
-        libraries_to_link = [library_to_link],
+        linker_inputs = depset(direct = [linker_input]),
     )
     cc_info = cc_common.merge_cc_infos(
         cc_infos = [
@@ -577,6 +668,11 @@ haskell_cabal_library = rule(
             executable = True,
             cfg = "host",
             default = Label("@rules_haskell//haskell:cabal_wrapper"),
+        ),
+        "_runghc": attr.label(
+            executable = True,
+            cfg = "host",
+            default = Label("@rules_haskell//haskell:runghc"),
         ),
         "_cc_toolchain": attr.label(
             default = Label("@bazel_tools//tools/cpp:current_cc_toolchain"),
@@ -684,6 +780,7 @@ def _haskell_cabal_binary_impl(ctx):
         hs,
         cc,
         posix,
+        ctx.workspace_name,
         dep_info,
         cc_info,
         direct_cc_info,
@@ -700,22 +797,26 @@ def _haskell_cabal_binary_impl(ctx):
         flags = ctx.attr.flags,
         generate_haddock = False,
         cabal_wrapper = ctx.executable._cabal_wrapper,
+        runghc = ctx.executable._runghc,
         package_database = package_database,
         verbose = ctx.attr.verbose,
-        dynamic_binary = binary,
+        dynamic_file = binary,
         transitive_haddocks = _gather_transitive_haddocks(ctx.attr.deps),
     )
+    (_, runghc_manifest) = ctx.resolve_tools(tools = [ctx.attr._runghc])
+    json_args = ctx.actions.declare_file("{}_cabal_wrapper_args.json".format(ctx.label.name))
+    ctx.actions.write(json_args, c.args.to_json())
     ctx.actions.run(
         executable = c.cabal_wrapper,
-        arguments = [c.args],
-        inputs = c.inputs,
-        input_manifests = c.input_manifests,
+        arguments = [json_args.path],
+        inputs = depset([json_args], transitive = [c.inputs]),
+        input_manifests = c.input_manifests + runghc_manifest,
         outputs = [
             package_database,
             binary,
             data_dir,
         ],
-        tools = [c.cabal_wrapper],
+        tools = [c.cabal_wrapper, ctx.executable._runghc],
         env = c.env,
         mnemonic = "HaskellCabalBinary",
         progress_message = "HaskellCabalBinary {}".format(hs.label),
@@ -790,6 +891,11 @@ haskell_cabal_binary = rule(
             cfg = "host",
             default = Label("@rules_haskell//haskell:cabal_wrapper"),
         ),
+        "_runghc": attr.label(
+            executable = True,
+            cfg = "host",
+            default = Label("@rules_haskell//haskell:runghc"),
+        ),
         "_cc_toolchain": attr.label(
             default = Label("@bazel_tools//tools/cpp:current_cc_toolchain"),
         ),
@@ -843,6 +949,7 @@ _CORE_PACKAGES = [
     "directory",
     "filepath",
     "ghc",
+    "ghc-bignum",
     "ghc-boot",
     "ghc-boot-th",
     "ghc-compact",
@@ -1176,10 +1283,13 @@ def _pin_packages(repository_ctx, resolved):
     errmsg = "Unexpected format in {context}: {{error}}"
 
     # Determine current git revision of all-cabal-hashes.
+    hashes_url = "https://api.github.com/repos/commercialhaskell/all-cabal-hashes/git/ref/heads/hackage"
+    auth = _get_auth(repository_ctx, [hashes_url])
     repository_ctx.download(
-        "https://api.github.com/repos/commercialhaskell/all-cabal-hashes/git/ref/heads/hackage",
+        hashes_url,
         output = "all-cabal-hashes-hackage.json",
         executable = False,
+        auth = auth,
     )
     hashes_json = json_parse(repository_ctx.read("all-cabal-hashes-hackage.json"))
     hashes_object = _parse_json_field(
@@ -1247,28 +1357,33 @@ def _pin_packages(repository_ctx, resolved):
             ).sha256
 
             # stack also doesn't expose any subdirectories that need to be
-            # stripped. Here we assume the project root to be the root
-            # directory or underneath a top-level directory.
-            root = repository_ctx.path("{name}-{version}".format(**spec))
+            # stripped. Here we assume the project root to be the directory
+            # that contains the cabal file.
+            root = "{name}-{version}".format(**spec)
             cabal_file = "{name}.cabal".format(**spec)
-            if root.get_child(cabal_file).exists:
-                stripPrefix = ""
-            else:
-                subdirs = [
-                    subdir
-                    for subdir in root.readdir()
-                    if subdir.get_child(cabal_file).exists
+            if get_cpu_value(repository_ctx) == "x64_windows":
+                find_cmd = ["cmd", "/c", "dir", "/s", "/b", paths.join(root, cabal_file).replace("/", "\\")]
+                found_cabal_files = [
+                    paths.relativize(line.strip().replace("\\", "/"), str(repository_ctx.path(root)))
+                    for line in _execute_or_fail_loudly(repository_ctx, find_cmd).stdout.splitlines()
+                    if line.strip() != ""
                 ]
-                if len(subdirs) != 1:
-                    fail("Unsupported archive format at {url}: Expected {cabal} in the root or underneath a top-level directory".format(
-                        url = spec["location"]["url"],
-                        cabal = cabal_file,
-                    ))
-                stripPrefix = subdirs[0].basename
+            else:
+                find_cmd = ["find", root, "-name", cabal_file]
+                found_cabal_files = [
+                    paths.relativize(line.strip(), root)
+                    for line in _execute_or_fail_loudly(repository_ctx, find_cmd).stdout.splitlines()
+                    if line.strip() != ""
+                ]
+            if len(found_cabal_files) != 1:
+                fail("Unsupported archive format at {url}: Could not find {cabal} in the archive.".format(
+                    url = spec["location"]["url"],
+                    cabal = cabal_file,
+                ))
 
             spec["pinned"] = {
                 "sha256": sha256,
-                "strip-prefix": stripPrefix,
+                "strip-prefix": paths.dirname(found_cabal_files[0]),
             }
         elif spec["location"]["type"] in ["git", "hg"]:
             # Bazel cannot cache git (or hg) repositories in the repository
@@ -1332,11 +1447,17 @@ def _download_packages(repository_ctx, snapshot, pinned):
 
 def _download_packages_unpinned(repository_ctx, snapshot, resolved):
     """Download remote packages using `stack unpack`."""
-    remote_packages = [
+    versioned_packages = [
+        "{}-{}".format(package["name"], package["version"])
+        for package in resolved.values()
+        if package["location"]["type"] == "hackage"
+    ]
+    unversioned_packages = [
         package["name"]
         for package in resolved.values()
-        if package["location"]["type"] not in ["core", "vendored"]
+        if package["location"]["type"] not in ["core", "hackage", "vendored"]
     ]
+    remote_packages = versioned_packages + unversioned_packages
     stack = [repository_ctx.path(repository_ctx.attr.stack)]
     if remote_packages:
         _execute_or_fail_loudly(repository_ctx, stack + ["--resolver", snapshot, "unpack"] + remote_packages)
@@ -1894,6 +2015,7 @@ _stack_snapshot_unpinned = repository_rule(
         "flags": attr.string_list_dict(),
         "stack": attr.label(),
         # "stack_update": attr.label(),
+        "netrc": attr.string(),
     },
 )
 
@@ -2058,6 +2180,7 @@ def stack_snapshot(
         components = {},
         # stack_update = None,
         verbose = False,
+        netrc = "",
         **kwargs):
     """Use Stack to download and extract Cabal source distributions.
 
@@ -2215,6 +2338,8 @@ def stack_snapshot(
       verbose: Whether to show the output of the build.
       stack_update: A meta repository that is used to avoid multiple concurrent invocations of
         `stack update` which could fail due to a race on the hackage security lock.
+      netrc: Location of the .netrc file to use for authentication.
+        Defaults to `~/.netrc` if present.
     """
     typecheck_stackage_extradeps(extra_deps)
     if not stack:
@@ -2241,6 +2366,7 @@ def stack_snapshot(
         stack_snapshot_json = stack_snapshot_json,
         packages = packages,
         flags = flags,
+        netrc = netrc,
     )
     _stack_snapshot(
         name = name,

@@ -8,6 +8,7 @@ load(
     "CPP_LINK_EXECUTABLE_ACTION_NAME",
     "C_COMPILE_ACTION_NAME",
 )
+load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load(
     "//haskell:providers.bzl",
     "GhcPluginInfo",
@@ -19,6 +20,7 @@ CcInteropInfo = provider(
     doc = "Information needed for interop with cc rules.",
     fields = {
         "tools": "Tools from the CC toolchain",
+        "env": "Dictionary with environment variables to call the CC toolchain",
         # See the following for why this is needed:
         # https://stackoverflow.com/questions/52769846/custom-c-rule-with-the-cc-common-api
         "files": "Files for all tools (input to any action that uses tools)",
@@ -73,13 +75,12 @@ def cc_interop_info(ctx):
 
     hdrs = depset(transitive = hdrs)
 
-    # XXX Workaround https://github.com/bazelbuild/bazel/issues/6874.
-    # Should be find_cpp_toolchain() instead.
-    cc_toolchain = ctx.attr._cc_toolchain[cc_common.CcToolchainInfo]
+    # XXX: protobuf is passing a "patched ctx"
+    # which includes the real ctx as "real_ctx"
+    real_ctx = getattr(ctx, "real_ctx", ctx)
+    cc_toolchain = find_cpp_toolchain(real_ctx)
     feature_configuration = cc_common.configure_features(
-        # XXX: protobuf is passing a "patched ctx"
-        # which includes the real ctx as "real_ctx"
-        ctx = getattr(ctx, "real_ctx", ctx),
+        ctx = real_ctx,
         cc_toolchain = cc_toolchain,
         requested_features = ctx.features,
         unsupported_features = ctx.disabled_features,
@@ -105,12 +106,16 @@ def cc_interop_info(ctx):
         action_name = CPP_LINK_EXECUTABLE_ACTION_NAME,
         variables = link_variables,
     )
+    real_cc_path = cc_common.get_tool_for_action(
+        feature_configuration = feature_configuration,
+        action_name = C_COMPILE_ACTION_NAME,
+    )
 
     # Generate cc wrapper script on Darwin that adjusts load commands.
     hs_toolchain = ctx.toolchains["@rules_haskell//haskell:toolchain"]
     cc_wrapper = hs_toolchain.cc_wrapper
     cc = cc_wrapper.executable.path
-    cc_files = ctx.files._cc_toolchain + cc_wrapper.inputs.to_list()
+    cc_files = depset(transitive = [cc_toolchain.all_files, cc_wrapper.inputs])
     cc_manifests = cc_wrapper.manifests
 
     tools = {
@@ -130,12 +135,24 @@ def cc_interop_info(ctx):
     if tools["ar"].find("libtool") >= 0:
         tools["ar"] = "/usr/bin/ar"
 
+    env = {}
+    if hs_toolchain.is_darwin:
+        env["CC_WRAPPER_PLATFORM"] = "darwin"
+    elif hs_toolchain.is_windows:
+        env["CC_WRAPPER_PLATFORM"] = "windows"
+    else:
+        env["CC_WRAPPER_PLATFORM"] = "linux"
+
+    env["CC_WRAPPER_CC_PATH"] = real_cc_path
+    env["CC_WRAPPER_CPU"] = cc_toolchain.cpu
+
     cc_libraries_info = deps_HaskellCcLibrariesInfo(
         ctx.attr.deps + getattr(ctx.attr, "plugins", []) + getattr(ctx.attr, "setup_deps", []),
     )
     return CcInteropInfo(
         tools = struct(**tools),
-        files = cc_files,
+        env = env,
+        files = cc_files.to_list(),
         manifests = cc_manifests,
         hdrs = hdrs.to_list(),
         cpp_flags = cpp_flags,
@@ -146,23 +163,23 @@ def cc_interop_info(ctx):
         # https://github.com/bazelbuild/bazel/issues/4571.
         linker_flags = linker_flags,
         cc_libraries_info = cc_libraries_info,
-        cc_libraries = get_cc_libraries(cc_libraries_info, cc_common.merge_cc_infos(cc_infos = ccs).linking_context.libraries_to_link.to_list()),
-        transitive_libraries = cc_common.merge_cc_infos(cc_infos = [
+        cc_libraries = get_cc_libraries(cc_libraries_info, [lib for li in cc_common.merge_cc_infos(cc_infos = ccs).linking_context.linker_inputs.to_list() for lib in li.libraries]),
+        transitive_libraries = [lib for li in cc_common.merge_cc_infos(cc_infos = [
             dep[CcInfo]
             for dep in ctx.attr.deps
             if CcInfo in dep
-        ]).linking_context.libraries_to_link.to_list(),
-        plugin_libraries = cc_common.merge_cc_infos(cc_infos = [
+        ]).linking_context.linker_inputs.to_list() for lib in li.libraries],
+        plugin_libraries = [lib for li in cc_common.merge_cc_infos(cc_infos = [
             dep[CcInfo]
             for plugin in getattr(ctx.attr, "plugins", [])
             for dep in plugin[GhcPluginInfo].deps
             if CcInfo in dep
-        ]).linking_context.libraries_to_link.to_list(),
-        setup_libraries = cc_common.merge_cc_infos(cc_infos = [
+        ]).linking_context.linker_inputs.to_list() for lib in li.libraries],
+        setup_libraries = [lib for li in cc_common.merge_cc_infos(cc_infos = [
             dep[CcInfo]
             for dep in getattr(ctx.attr, "setup_deps", [])
             if CcInfo in dep
-        ]).linking_context.libraries_to_link.to_list(),
+        ]).linking_context.linker_inputs.to_list() for lib in li.libraries],
     )
 
 def ghc_cc_program_args(cc):

@@ -17,7 +17,8 @@ mkShell {
     which
     perl
     python3
-    bazel
+    bazel_4
+    jdk11
     # For stack_install.
     stack
     # Needed for @com_github_golang_protobuf, itself needed by buildifier.
@@ -48,6 +49,6 @@ mkShell {
     fi
 
     # source bazel bash completion
-    source ${pkgs.bazel}/share/bash-completion/completions/bazel
+    source ${bazel_4}/share/bash-completion/completions/bazel.bash
   '';
 }

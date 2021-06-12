@@ -6,8 +6,8 @@
 MIN_BAZEL_MAJOR=2
 MIN_BAZEL_MINOR=1
 
-MAX_BAZEL_MAJOR=3
-MAX_BAZEL_MINOR=3
+MAX_BAZEL_MAJOR=4
+MAX_BAZEL_MINOR=0
 
 set -e
 
@@ -48,12 +48,45 @@ parse_args () {
     esac
 }
 
-check_files_dont_exist () {
-    if [ -e WORKSPACE ] || [ -e BUILD ] || [ -e BazelExample.hs ]
+check_dir () {
+    if [ -d "$1" ] # we can't write a file when a directory of that name exists
     then
-        echo "Current directory already has WORKSPACE and/or BUILD and/or BazelExample.hs files." >&2
+        echo "STOP: There's a directory named $1 but we want to write a file with the same name. Please delete or rename the $1 directory." >&2
         exit 1
     fi
+}
+
+check_alt () {
+    check_dir "$2"
+    if [ -f "$1" ]
+    then
+        echo "STOP: There's a $1 file but we intend to write a $2 file. When both exist, bazel will pick the one with the .bazel extension, ignoring the other one. Please delete the $1 file." >&2
+        exit 1
+    fi
+}
+
+check_clash () {
+    check_dir "$1"
+    if [ -e "$1" ]
+    then
+        echo "STOP: The current directory already has a $1 file and we don't want to overwrite it." >&2
+        exit 1
+    fi
+}
+
+check_files_dont_exist () {
+    # A BUILD.bazel file takes precedence over a BUILD file and likewise
+    # a WORKSPACE.bazel file takes precedence over a WORKSPACE file. We write
+    # BUILD.bazel and WORKSPACE files.
+    # Some Bazel tooling may fail on WORKSPACE.bazel files,
+    # e.g. https://github.com/bazelbuild/bazel-gazelle/issues/678
+    check_alt WORKSPACE.bazel WORKSPACE
+    check_alt BUILD BUILD.bazel
+
+    for clash in .bazelrc WORKSPACE BUILD.bazel zlib.BUILD.bazel Example.hs
+    do
+        check_clash $clash
+    done
 }
 
 check_bazel_version () {
@@ -109,13 +142,10 @@ nix_toolchain=$(cat <<EOF
 # which was already initialized by rules_haskell_dependencies above.
 load(
     "@io_tweag_rules_nixpkgs//nixpkgs:nixpkgs.bzl",
+    "nixpkgs_cc_configure",
     "nixpkgs_git_repository",
     "nixpkgs_package",
     "nixpkgs_python_configure",
-)
-
-nixpkgs_python_configure(
-    repository = "@nixpkgs",
 )
 
 # Fetch a version of nixpkgs from GitHub.
@@ -123,8 +153,16 @@ nixpkgs_python_configure(
 # https://github.com/tweag/rules_nixpkgs/blob/master/README.md
 nixpkgs_git_repository(
     name = "nixpkgs",
-    revision = "19.03",
+    revision = "20.09",
     # sha256 = …
+)
+
+nixpkgs_cc_configure(
+    repository = "@nixpkgs",
+)
+
+nixpkgs_python_configure(
+    repository = "@nixpkgs",
 )
 
 load(
@@ -138,7 +176,7 @@ load(
 haskell_register_ghc_nixpkgs(
     repository = "@nixpkgs",
     attribute_path = "ghc",
-    version = "8.6.4",
+    version = "8.8.4",
 )
 EOF
 )
@@ -161,7 +199,12 @@ cc_library(
     includes = ["."],
     visibility = ["//visibility:public"],
 )
-cc_library(name = "z", srcs = glob(["*.c"]), hdrs = glob(["*.h"]))
+cc_library(
+    name = "z",
+    srcs = glob(["*.c"]),
+    hdrs = glob(["*.h"]),
+    copts = ["-Wno-implicit-function-declaration"],
+)
 EOF
     ;;
 
@@ -244,9 +287,9 @@ load(
 # Download rules_haskell and make it accessible as "@rules_haskell".
 http_archive(
     name = "rules_haskell",
-    strip_prefix = "rules_haskell-0.12",
-    urls = ["https://github.com/tweag/rules_haskell/archive/v0.12.tar.gz"],
-    sha256 = "56a8e6337df8802f1e0e7d2b3d12d12d5d96c929c8daecccc5738a0f41d9c1e4",
+    strip_prefix = "rules_haskell-0.13",
+    urls = ["https://github.com/tweag/rules_haskell/archive/v0.13.tar.gz"],
+    sha256 = "b4e2c00da9bc6668fa0404275fecfdb31beb700abdba0e029e74cacc388d94d6",
 )
 
 load(
@@ -292,6 +335,7 @@ build:ci --jobs=2
 build:ci --verbose_failures
 common:ci --color=no
 test:ci --test_output=errors
+build:ci-windows --crosstool_top=@rules_haskell_ghc_windows_amd64//:cc_toolchain
 
 $(insert_if_equal $mode "nix" '
 # This project uses a GHC provisioned via nix.

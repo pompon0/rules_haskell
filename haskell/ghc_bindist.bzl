@@ -3,10 +3,21 @@
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "patch")
 load("@bazel_tools//tools/cpp:lib_cc_configure.bzl", "get_cpu_value")
 load("@rules_sh//sh:posix.bzl", "sh_posix_configure")
-load(":private/workspace_utils.bzl", "execute_or_fail_loudly")
+load(
+    ":private/pkgdb_to_bzl.bzl",
+    "pkgdb_to_bzl",
+)
+load(
+    ":private/workspace_utils.bzl",
+    "define_rule",
+    "execute_or_fail_loudly",
+    "find_python",
+    "resolve_labels",
+)
 
-_GHC_DEFAULT_VERSION = "8.6.5"  # If you change this, change stackage's version
-# in the start script (see stackage.org)
+# If you change this, change stackage's version in the start script
+# (see stackage.org).
+_GHC_DEFAULT_VERSION = "8.6.5"
 
 # Generated with `bazel run @rules_haskell//haskell:gen-ghc-bindist`
 # To add a version or architecture, edit the constants in haskell/gen_ghc_bindist.py,
@@ -211,6 +222,20 @@ GHC_BINDIST = \
                 "e22586762af0911c06e8140f1792e3ca381a3a482a20d67b9054883038b3a422",
             ),
         },
+        "8.8.4": {
+            "darwin_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.4/ghc-8.8.4-x86_64-apple-darwin.tar.xz",
+                "e80a789e9d8cfb41dd87f3284b75432427c4461c1731d220d04ead8733ccdb5e",
+            ),
+            "linux_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.4/ghc-8.8.4-x86_64-deb8-linux.tar.xz",
+                "51a36892f1264744195274187298d13ac62bce2da86d4ddf76d8054ab90f2feb",
+            ),
+            "windows_amd64": (
+                "https://downloads.haskell.org/~ghc/8.8.4/ghc-8.8.4-x86_64-unknown-mingw32.tar.xz",
+                "d185055d2c8dc3bfe5b88afd59d6877eb1e722b672d1c9649f18296e148ed71f",
+            ),
+        },
         "8.10.1": {
             "darwin_amd64": (
                 "https://downloads.haskell.org/~ghc/8.10.1/ghc-8.10.1-x86_64-apple-darwin.tar.xz",
@@ -239,17 +264,58 @@ GHC_BINDIST = \
                 "dcae4c173b9896e07ff048de5509aa0a4537233150e06e5ce8848303dfadc176",
             ),
         },
+        "8.10.3": {
+            "darwin_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.3/ghc-8.10.3-x86_64-apple-darwin.tar.xz",
+                "2635f35d76e44e69afdfd37cae89d211975cc20f71f784363b72003e59f22015",
+            ),
+            "linux_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.3/ghc-8.10.3-x86_64-deb9-linux.tar.xz",
+                "95e4aadea30701fe5ab84d15f757926d843ded7115e11c4cd827809ca830718d",
+            ),
+            "windows_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.3/ghc-8.10.3-x86_64-unknown-mingw32.tar.xz",
+                "927a6c699533a115cd49772ef2c753d9af2c13bf9f0b2d3bd13645cc6a144ee3",
+            ),
+        },
+        "8.10.4": {
+            "darwin_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.4/ghc-8.10.4-x86_64-apple-darwin.tar.xz",
+                "725ecf6543e63b81a3581fb8c97afd21a08ae11bc0fa4f8ee25d45f0362ef6d5",
+            ),
+            "linux_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.4/ghc-8.10.4-x86_64-deb9-linux.tar.xz",
+                "5694200a5c38f22c142baf850b1d2f3784211d2ec9302e11693259a1ae8e38b7",
+            ),
+            "windows_amd64": (
+                "https://downloads.haskell.org/~ghc/8.10.4/ghc-8.10.4-x86_64-unknown-mingw32.tar.xz",
+                "e9175a276504c3390a5e0084954e6997d56078737dbe7158049518892cf6bfb2",
+            ),
+        },
+        "9.0.1": {
+            "darwin_amd64": (
+                "https://downloads.haskell.org/~ghc/9.0.1/ghc-9.0.1-x86_64-apple-darwin.tar.xz",
+                "122d60509147d0117779d275f0215bde2ff63a64cda9d88f149432d0cae71b22",
+            ),
+            "linux_amd64": (
+                "https://downloads.haskell.org/~ghc/9.0.1/ghc-9.0.1-x86_64-deb9-linux.tar.xz",
+                "4ca6252492f59fe589029fadca4b6f922d6a9f0ff39d19a2bd9886fde4e183d5",
+            ),
+            "windows_amd64": (
+                "https://downloads.haskell.org/~ghc/9.0.1/ghc-9.0.1-x86_64-unknown-mingw32.tar.xz",
+                "4f4ab118df01cbc7e7c510096deca0cb25025339a97730de0466416296202493",
+            ),
+        },
     }
 
 def _ghc_bindist_impl(ctx):
-    # Avoid rule restart by resolving these labels early. See
-    # https://github.com/bazelbuild/bazel/blob/master/tools/cpp/lib_cc_configure.bzl#L17.
-    ghc_build = ctx.path(Label("@rules_haskell//haskell:ghc.BUILD.tpl"))
-
+    paths = resolve_labels(ctx, [
+        "@rules_haskell//haskell:ghc.BUILD.tpl",
+        "@rules_haskell//haskell:private/pkgdb_to_bzl.py",
+    ])
     version = ctx.attr.version
     target = ctx.attr.target
     os, _, arch = target.partition("_")
-    python_bin = _find_python(ctx)
 
     if GHC_BINDIST[version].get(target) == None:
         fail("Operating system {0} does not have a bindist for GHC version {1}".format(ctx.os.name, ctx.attr.version))
@@ -266,6 +332,26 @@ def _ghc_bindist_impl(ctx):
         stripPrefix = "ghc-" + version,
     )
 
+    if os == "windows":
+        # These libraries cause linking errors on Windows when linking
+        # pthreads, due to libwinpthread-1.dll not being loaded.
+        execute_or_fail_loudly(ctx, ["rm", "mingw/lib/gcc/x86_64-w64-mingw32/7.2.0/libstdc++.dll.a"])
+        execute_or_fail_loudly(ctx, ["rm", "mingw/x86_64-w64-mingw32/lib/libpthread.dll.a"])
+        execute_or_fail_loudly(ctx, ["rm", "mingw/x86_64-w64-mingw32/lib/libwinpthread.dll.a"])
+
+        # Similarly causes loading issues with template Haskell. E.g.
+        #
+        #   ghc.exe: panic! (the 'impossible' happened)
+        #     (GHC version 8.6.5 for x86_64-unknown-mingw32):
+        #      loadArchive "C:\\Users\\runneradmin\\_bazel_runneradmin\\minshlu6\\external\\rules_haskell_ghc_windows_amd64\\mingw\\lib\\libz.dll.a": failed
+        #
+        #   Please report this as a GHC bug:  http://www.haskell.org/ghc/reportabug
+        #
+        #   ghc.exe: Could not load `zlib1.dll'. Reason: addDLL: zlib1.dll or dependencies not loaded. (Win32 error 126)
+        #
+        # on //tests/haddock:haddock-lib-b.
+        execute_or_fail_loudly(ctx, ["rm", "mingw/lib/libz.dll.a"])
+
     # We apply some patches, if needed.
     patch(ctx)
 
@@ -279,85 +365,61 @@ def _ghc_bindist_impl(ctx):
         # tools! This means that sed -i always takes an argument.
         execute_or_fail_loudly(ctx, ["sed", "-e", "s/RelocatableBuild = NO/RelocatableBuild = YES/", "-i.bak", "mk/config.mk.in"])
         execute_or_fail_loudly(ctx, ["./configure", "--prefix", bindist_dir.realpath])
-        execute_or_fail_loudly(ctx, ["make", "install"])
+        execute_or_fail_loudly(
+            ctx,
+            ["make", "install"],
+            # Necessary for deterministic builds on macOS. See
+            # https://blog.conan.io/2019/09/02/Deterministic-builds-with-C-C++.html.
+            # The proper fix is for the GHC bindist to always use ar
+            # and never use libtool, which has a -D flag for
+            # deterministic builds that works better than
+            # ZERO_AR_DATE. See
+            # https://source.chromium.org/chromium/chromium/src/+/62848c8d298690e086e49a9832278ff56b6976b5.
+            environment = {"ZERO_AR_DATE": "1"},
+        )
         ctx.file("patch_bins", executable = True, content = r"""#!/usr/bin/env bash
-grep --files-with-matches --null {bindist_dir} bin/* | xargs -0 -n1 \
+find bin -type f -print0 | xargs -0 \
+grep --files-with-matches --null {bindist_dir} | xargs -0 -n1 \
     sed -i.bak \
         -e '2i\
-          DISTDIR="$( dirname "$(resolved="$0"; while tmp="$(readlink "$resolved")"; do resolved="$tmp"; done; echo "$resolved")" )/.."' \
+DISTDIR="$( dirname "$(resolved="$0"; cd "$(dirname "$resolved")"; while tmp="$(readlink "$(basename "$resolved")")"; do resolved="$tmp"; cd "$(dirname "$resolved")"; done; echo "$PWD/$(basename "$resolved")")" )/.."' \
         -e 's:{bindist_dir}:$DISTDIR:'
 """.format(
             bindist_dir = bindist_dir.realpath,
         ))
         execute_or_fail_loudly(ctx, ["./patch_bins"])
 
-    # The default locale is OS specific.
-    if ctx.attr.locale:
-        locale = ctx.attr.locale
-    else:
-        locale = "en_US.UTF-8" if os == "darwin" else "C.UTF-8"
-
-    # Generate BUILD file entries describing each prebuilt package.
-    # Cannot use //haskell:pkgdb_to_bzl because that's a generated
-    # target. ctx.path() only works on source files.
-    pkgdb_to_bzl = ctx.path(Label("@rules_haskell//haskell:private/pkgdb_to_bzl.py"))
-    result = ctx.execute([
-        python_bin,
-        pkgdb_to_bzl,
-        ctx.attr.name,
-        "lib",
-    ])
-    if result.return_code:
-        fail("Error executing pkgdb_to_bzl.py: {stderr}".format(stderr = result.stderr))
-    toolchain_libraries = result.stdout
-    toolchain = """
-{toolchain_libraries}
-
-haskell_toolchain(
-    name = "toolchain-impl",
-    tools = [":bin"],
-    libraries = toolchain_libraries,
-    version = "{version}",
-    static_runtime = {static_runtime},
-    fully_static_link = {fully_static_link},
-    compiler_flags = {compiler_flags},
-    haddock_flags = {haddock_flags},
-    repl_ghci_args = {repl_ghci_args},
-    cabalopts = {cabalopts},
-    visibility = ["//visibility:public"],
-    locale = "{locale}",
-)
-    """.format(
-        toolchain_libraries = toolchain_libraries,
-        version = ctx.attr.version,
+    toolchain_libraries = pkgdb_to_bzl(ctx, paths, "lib")
+    locale = ctx.attr.locale or "en_US.UTF-8" if os == "darwin" else "C.UTF-8"
+    toolchain = define_rule(
+        "haskell_toolchain",
+        name = "toolchain-impl",
+        tools = [":bin"],
+        libraries = "toolchain_libraries",
+        # See Note [GHC toolchain files]
+        files = [
+            ":lib/settings",
+            ":lib/include/ghcplatform.h",
+            ":lib/include/ghcversion.h",
+        ],
+        version = repr(ctx.attr.version),
         static_runtime = os == "windows",
-
-        # At present we don't support fully-statically-linked binaries with GHC
-        # bindists.
-        fully_static_link = False,
+        fully_static_link = False,  # XXX not yet supported for bindists.
         compiler_flags = ctx.attr.compiler_flags,
         haddock_flags = ctx.attr.haddock_flags,
         repl_ghci_args = ctx.attr.repl_ghci_args,
         cabalopts = ctx.attr.cabalopts,
-        locale = locale,
+        locale = repr(locale),
     )
-
-    if os == "windows":
-        # These libraries cause linking errors on Windows when linking
-        # pthreads, due to libwinpthread-1.dll not being loaded.
-        execute_or_fail_loudly(ctx, ["rm", "mingw/lib/gcc/x86_64-w64-mingw32/7.2.0/libstdc++.dll.a"])
-        execute_or_fail_loudly(ctx, ["rm", "mingw/x86_64-w64-mingw32/lib/libpthread.dll.a"])
-        execute_or_fail_loudly(ctx, ["rm", "mingw/x86_64-w64-mingw32/lib/libwinpthread.dll.a"])
-
     ctx.template(
         "BUILD",
-        ghc_build,
+        paths["@rules_haskell//haskell:ghc.BUILD.tpl"],
         substitutions = {
+            "%{toolchain_libraries}": toolchain_libraries,
             "%{toolchain}": toolchain,
         },
         executable = False,
     )
-    ctx.file("WORKSPACE")
 
 _ghc_bindist = repository_rule(
     _ghc_bindist_impl,
@@ -480,6 +542,7 @@ def ghc_bindist(
         "8.8.1": ["@rules_haskell//haskell:assets/ghc_8_8_1_win_base.patch"],
         "8.8.2": ["@rules_haskell//haskell:assets/ghc_8_8_2_win_base.patch"],
         "8.8.3": ["@rules_haskell//haskell:assets/ghc_8_8_3_win_base.patch"],
+        "8.8.4": ["@rules_haskell//haskell:assets/ghc_8_8_4_win_base.patch"],
     }.get(version) if target == "windows_amd64" else None
 
     extra_attrs = {"patches": patches, "patch_args": ["-p0"]} if patches else {}
@@ -548,18 +611,9 @@ def haskell_register_ghc_bindists(
     if local_python_repo_name not in native.existing_rules():
         _configure_python3_toolchain(name = local_python_repo_name)
 
-def _find_python(repository_ctx):
-    python = repository_ctx.which("python3")
-    if not python:
-        python = repository_ctx.which("python")
-        result = repository_ctx.execute([python, "--version"])
-        if not result.stdout.startswith("Python 3"):
-            fail("rules_haskell requires Python >= 3.3.")
-    return python
-
 def _configure_python3_toolchain_impl(repository_ctx):
     cpu = get_cpu_value(repository_ctx)
-    python3_path = _find_python(repository_ctx)
+    python3_path = find_python(repository_ctx)
     repository_ctx.file("BUILD.bazel", executable = False, content = """
 load(
     "@bazel_tools//tools/python:toolchain.bzl",
@@ -641,3 +695,26 @@ def _configure_python3_toolchain(name):
     """
     _config_python3_toolchain(name = name)
     native.register_toolchains("@{}//:toolchain".format(name))
+
+# Note [GHC toolchain files]
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+# The GHC distribution includes various files that may be required during
+# compilation, or may be referenced by template Haskell code. These files
+# need to be tracked by Bazel and declared as inputs to the relevant actions
+# to ensure that they are present in the build sandbox.
+#
+# Surprisingly, builds succeed with little to none of such files declared as
+# inputs. In case of the nixpkgs toolchain this is not surprising, as the
+# files will all be present in the Nix store. However, files of the bindist
+# toolchain are fully tracked by Bazel and one would expect errors due to
+# missing files if they are not declared.
+#
+# The first instance of such an error occurred with the GHC bindist on
+# BazelCI [1] and shortly after on the GitHub actions CI pipeline. However,
+# only the `lib/settings` file was reported missing.
+#
+# Do extend the `files` toolchain attributes with further files if such
+# errors occurr in the future.
+#
+# [1]: https://github.com/tweag/rules_haskell/issues/1470
